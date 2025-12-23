@@ -5,6 +5,8 @@ import cvzone
 from state_tracker import StateTracker
 import board_detection
 import fen_generator
+# from move_detector import detect_move # Now used inside StableMoveDetector
+from stable_move_detector import StableMoveDetector
 from grid_extractor import GridExtractor
 from square_classifier import SquareClassifier
 
@@ -66,12 +68,15 @@ def main():
     
     grid_extractor = GridExtractor()
     classifier = SquareClassifier()
-    tracker = StateTracker(history_length=5)
+    # tracker = StateTracker(history_length=5) # Kept for 'smooth' display if needed, but logic uses Stable
+    move_detector = StableMoveDetector(stability_threshold=15)
     
     board_detection_mode = True
     board_corners = None
     rotation_state = 0
     debug_mode = False
+    
+    # last_confirmed_fen = None # Managed by move_detector now
     
     print("iniciando sistema de visao de xadrez (GRID-BASED)...")
     print("PASSO 1: CONFIGURAÇÃO INICIAL")
@@ -214,15 +219,20 @@ def main():
             # Generate FEN
             current_fen = fen_generator.generate_fen(board_map)
             
-            # Update State
-            stable_fen, changed = tracker.update(current_fen)
+            # Update State Machine
+            move = move_detector.process(current_fen)
+            stability_status = move_detector.get_status()
             
             # Display Status
-            status_text = f"FEN: {stable_fen if stable_fen else 'estabilizando...'}"
-            cv2.putText(img, status_text, (10, 30), cv2.FONT_HERSHEY_PLAIN, 1.5, (0, 255, 0), 2)
+            cv2.putText(img, f"Status: {stability_status}", (10, 30), cv2.FONT_HERSHEY_PLAIN, 1.5, (0, 255, 0), 2)
+            cv2.putText(img, f"FEN: {move_detector.confirmed_fen if move_detector.confirmed_fen else '...'}", (10, 60), cv2.FONT_HERSHEY_PLAIN, 1.0, (200, 200, 200), 1)
             
-            if changed:
-                print(f"\n[movimento detectado] novo fen: {stable_fen}")
+            if move:
+                print(f"[movimento confirmado] {move}")
+            elif "Estabilizando" in stability_status:
+                # Optional: print debug only occasionally or just rely on UI
+                # print(f"[debug] {stability_status}") 
+                pass
                 
             # Show images
             cv2.imshow("visao de xadrez - principal", img)
