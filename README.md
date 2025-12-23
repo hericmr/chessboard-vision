@@ -1,77 +1,68 @@
-# Chess AI Vision System
+# ChessVision: Sistema de Digitalização de Tabuleiro
 
-This project integrates computer vision with chess engine analysis to create a real-time chess board analyzer. Using YOLO for chess piece detection and Stockfish for move analysis, the system generates a live FEN (Forsyth–Edwards Notation) string from a webcam feed and displays the top three move suggestions for both White and Black by drawing colored arrows on the board.
+Este projeto é uma ferramenta de visão computacional projetada para digitalizar um tabuleiro de xadrez físico em tempo real usando uma webcam comum (ou smartphone via Iriun Webcam).
 
-In the latest update, the chessboard is detected automatically from the webcam feed—eliminating the need for manual corner selection. The system now warps the board based on the automatically detected corners, then crops and rotates the image as needed.
+O foco atual é na **robustez, estabilidade e desempenho**, utilizando técnicas clássicas de visão computacional com OpenCV, deliberadamente evitando Deep Learning para a detecção do tabuleiro a fim de garantir zero jitter e baixo consumo de recursos.
 
-> **Note:** I used the Iriun Webcam App on both my phone and pc to use my phone as a camera, so the setup works with both built-in webcams and external devices.
+## Funcionalidades Principais
 
-## Features
+*   **Seleção Manual de ROI (Região de Interesse)**:
+    *   O operador desenha o retângulo do tabuleiro manualmente.
+    *   **Benefício**: Garante coordenadas 100% estáveis (zero tremedeira/jitter), essenciais para evitar "alucinações" de movimento de peças.
+    *   Ideal para setups com câmera fixa (tripé ou braço).
+    
+*   **Pipeline de Melhoria de Imagem (`frame_enhancer.py`)**:
+    *   Processamento em tempo real para tratar imagens de webcam.
+    *   **Correção de Luz**: CLAHE aplicado no canal de Luminosidade (LAB).
+    *   **Redução de Ruído**: Filtro Bilateral para suavizar texturas preservando bordas das peças.
+    *   **Sharpening**: Kernel de nitidez para destacar limites entre casas.
+    *   **Análise**: Geração de máscaras binárias (Otsu) para facilitar segmentação.
 
-- **Automatic Chessboard Detection**
-  The updated script now automatically detects the chessboard by locating the largest rectangular contour in the webcam feed. No manual calibration is required.
-  
-- **Real-Time Chess Piece Detection**  
-  Uses a YOLO model to detect chess pieces from a live webcam feed.
+*   **Suporte a Iriun Webcam**:
+    *   Documentado e otimizado para uso com smartphones como câmeras de alta fidelidade via Wi-Fi/USB.
 
-- **FEN Generation & Stability Check**  
-  Converts piece detections into a FEN string with a stability filter to reduce jitter.
-  
-- **Stockfish Integration**  
-  Queries Stockfish for the top three move suggestions for both White (blue arrows) and Black (red arrows).
-  
-- **Visual Feedback**  
-  Draws a chess grid, arrows, and Centipawn score representing the best moves on a warped, top-down view of the chessboard.
-  
-- **Optional Manual Calibration**  
-  The project still includes a calibration script (`edgeSelect.py`)  for cases where automatic detection might not work perfectly, but it is no longer the primary method.
-  A window will open showing the webcam feed.
-  Click four points corresponding to the corners of the chessboard (top-left, top-right, bottom-left, bottom-right) in order.
-  Press `s` to save the corners.
-  The saved file (chessboard_corners.p) will be used for warping the board.
-  > To be used for `unMained.py`
-  
-## Installation
+## Stack Tecnológico
 
-### Prerequisites
+*   **Linguagem**: Python 3.x
+*   **Bibliotecas**: OpenCV (`opencv-python`), NumPy.
+*   **Deep Learning?**: **NÃO utilizado** para detecção de bordas/tabuleiro (substituído por input manual determinístico).
 
-- Python 3.7 or higher
-- A working external camera (e.g., via the Iriun Webcam App to use your phone as a camera) [Iriun website](https://iriun.com/)
-- Make sure your smart phone and pc are connected to the same wifi network when running Iriun on your pc and phone
-- Stockfish chess engine (download from [Stockfish website](https://stockfishchess.org/download/))
-- clone the repository
-  ```bash
-  git clone https://github.com/donsolo-khalifa/chessAI.git
-  cd chessAI
-  ```
+## Pré-requisitos
 
-### Required Python Packages
+1.  Python 3 instalado.
+2.  Webcam conectada ou Smartphone + [Iriun Webcam](https://iriun.com/).
+3.  Bibliotecas:
+    ```bash
+    pip install -r requirements.txt
+    ```
 
-Install the required packages using pip:
+## Como Usar
 
+### 1. Testar Qualidade da Imagem
+Execute o script de melhoria para ajustar iluminação e foco:
 ```bash
-pip install -r requirements.txt
+python frame_enhancer.py
 ```
-### Usage
-- **1. Update Stockfish Path**
-Change the StockFish path
-```python
-stockfish = Stockfish(path="C:/Users/Presision/Downloads/stockfish-windows-x86-64/stockfish/stockfish-windows-x86-64.exe")
-```
-on line 27 in `main.py` to your own StockFish path. Then run:
+*   Verifique as janelas "Original" vs "Enhanced".
+*   Assegure que o tabuleiro esteja bem iluminado e focado.
+
+### 2. Executar o Sistema Principal
+(Em desenvolvimento - futura integração do ROI manual)
 ```bash
 python main.py
 ```
-The application will start capturing the webcam feed.
-The chessboard image is warped into a top-down view, and a grid is drawn.
-YOLO detects chess pieces on the board and converts the detections into a FEN string.
-Stockfish analyzes the board and the top three moves for both White (displayed as blue arrows) and Black (displayed as red arrows) are drawn on the warped image.
-The original webcam feed and the warped chessboard are displayed alongside each other.
+*   **Passo 1**: Uma janela mostrará o feed da câmera.
+*   **Passo 2**: Clique e arraste o mouse para desenhar um retângulo cobrindo EXATAMENTE o tabuleiro.
+*   **Passo 3**: Solte para confirmar. O sistema travará nessas coordenadas.
 
-- **2. Interacting with App**
-> If needed
-- Rotate the Board: Press `r` to rotate the board view by 90° increments if warpped chess board is not upright.
-- Recalibrate the Board: Press `d` to re-initiate automatic board detection if the chessboard is not detected correctly.
-- Quit: Press `q` to exit the application.
+## Decisões Técnicas
 
+| Decisão | Motivo |
+| :--- | :--- |
+| **ROI Manual vs Automático** | Algoritmos automáticos recalculam vértices a cada frame, causando oscilação ("jitter") nas casas. O ROI manual é imutável e computacionalmente gratuito. |
+| **OpenCV Puro vs YOLO/CNN** | Reduz latência e remove dependência de GPU dedicada para a etapa de segmentação do grid. |
+| **Filtro Bilateral** | Escolhido ao invés de Gaussian Blur por preservar as "quinas" das casas e peças, cruciais para a lógica de detecção. |
 
+## Contribuição
+
+Este projeto é focado em simplicidade e eficácia para digitalização de partidas físicas. Sugestões de melhoria em algoritmos de segmentação de cor/peça são bem-vindas.

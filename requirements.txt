@@ -2,6 +2,5 @@ opencv-python
 numpy
 cvzone
 mediapipe
-ultralytics
+mediapipe
 python-chess
-stockfish
