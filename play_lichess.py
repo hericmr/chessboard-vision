@@ -49,9 +49,9 @@ class LichessGame:
         # Estabilização temporal
         self.stable_occupancy = None
         self.stable_count = 0
-        self.STABILITY_REQUIRED = 15  # Frames necessários para confirmar
+        self.STABILITY_REQUIRED = 4   # Frames necessários para confirmar (era 15)
         self.last_move_time = 0
-        self.MOVE_COOLDOWN = 1.5  # Segundos entre movimentos
+        self.MOVE_COOLDOWN = 1.0      # Segundos entre movimentos (era 1.5)
         
     def connect_lichess(self) -> bool:
         """Connect to Lichess."""

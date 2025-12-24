@@ -108,96 +108,9 @@ class PieceDetector:
         
         return blurred
     
-    def _detect_circle_hough(self, gray):
-        """
-        Detecta círculos usando Hough Transform.
-        
-        Aceita círculos parciais (cortados na borda) -
-        pelo menos 80% do círculo precisa estar visível.
-        
-        Returns:
-            (found, center, radius) ou (False, None, None)
-        """
-        h, w = gray.shape
-        min_radius = int(min(h, w) * self.min_radius_ratio)
-        max_radius = int(min(h, w) * self.max_radius_ratio)
-        
-        # Parâmetros mais permissivos para círculos parciais
-        circles = cv2.HoughCircles(
-            gray,
-            cv2.HOUGH_GRADIENT,
-            dp=1.2,                    # Mais sensível
-            minDist=min(h, w) // 3,    # Permitir detecção mais perto da borda
-            param1=80,                  # Canny threshold mais baixo
-            param2=25,                  # Acumulador mais sensível
-            minRadius=min_radius,
-            maxRadius=max_radius
-        )
-        
-        if circles is not None and len(circles[0]) > 0:
-            # Pegar o círculo com centro mais próximo do centro da casa
-            # Mas aceitar círculos até 40% deslocados (para bordas)
-            center_x, center_y = w // 2, h // 2
-            max_allowed_dist = min(h, w) * 0.4  # 40% de deslocamento permitido
-            
-            best_circle = None
-            best_dist = float('inf')
-            
-            for circle in circles[0]:
-                cx, cy, r = circle
-                dist = np.sqrt((cx - center_x)**2 + (cy - center_y)**2)
-                
-                # Aceitar se está dentro do limite de deslocamento
-                if dist < max_allowed_dist and dist < best_dist:
-                    best_dist = dist
-                    best_circle = circle
-            
-            if best_circle is not None:
-                return True, (int(best_circle[0]), int(best_circle[1])), int(best_circle[2])
-        
-        return False, None, None
+
     
-    def _detect_small_circle(self, gray):
-        """
-        Detecta círculo PEQUENO no centro - topo de torre/cilindro.
-        
-        Torres têm um círculo pequeno (topo) que cobre 15-25% da área,
-        além da base maior. Útil para cantos onde a base fica distorcida.
-        
-        Returns:
-            (found, center, radius) ou (False, None, None)
-        """
-        h, w = gray.shape
-        
-        # Círculo pequeno: 15-30% do tamanho da casa
-        min_radius = int(min(h, w) * 0.12)
-        max_radius = int(min(h, w) * 0.25)
-        
-        # Usar parâmetros mais sensíveis para círculos pequenos
-        circles = cv2.HoughCircles(
-            gray,
-            cv2.HOUGH_GRADIENT,
-            dp=1.2,
-            minDist=min(h, w) // 3,
-            param1=80,
-            param2=25,  # Mais sensível
-            minRadius=min_radius,
-            maxRadius=max_radius
-        )
-        
-        if circles is not None and len(circles[0]) > 0:
-            center_x, center_y = w // 2, h // 2
-            
-            # Pegar o círculo mais próximo do centro
-            for circle in circles[0]:
-                cx, cy, r = circle
-                dist = np.sqrt((cx - center_x)**2 + (cy - center_y)**2)
-                
-                # Deve estar razoavelmente centralizado
-                if dist < min(h, w) * 0.3:
-                    return True, (int(cx), int(cy)), int(r)
-        
-        return False, None, None
+
     
     def _analyze_radial_symmetry(self, gray):
         """
@@ -267,6 +180,66 @@ class PieceDetector:
         # Se diferença alta, provavelmente há peça
         return diff, center_mean, border_mean
     
+    
+    def _detect_circle_unified(self, gray):
+        """
+        Detecção unificada de círculos (Grandes e Pequenos).
+        
+        Substitui _detect_circle_hough (peça inteira) e _detect_small_circle (topo).
+        Usa um range de raio mais amplo (12% a 55%) e seleciona o melhor candidato.
+        
+        Returns:
+            (found, center, radius, type)
+            type: 'hough' (grande) ou 'tower_top' (pequeno)
+        """
+        h, w = gray.shape
+        min_dim = min(h, w)
+        
+        # Range unificado: 12% (tower top) a 55% (peça cheia)
+        min_radius = int(min_dim * 0.12)
+        max_radius = int(min_dim * 0.55)
+        
+        # Param2=25 (mais sensível para pegar ambos)
+        circles = cv2.HoughCircles(
+            gray,
+            cv2.HOUGH_GRADIENT,
+            dp=1.2,
+            minDist=min_dim // 3,
+            param1=100,
+            param2=25,
+            minRadius=min_radius,
+            maxRadius=max_radius
+        )
+        
+        if circles is not None and len(circles[0]) > 0:
+            center_x, center_y = w // 2, h // 2
+            
+            best_circle = None
+            best_dist = float('inf')
+            
+            # Limite de centralização (30% do tamanho)
+            max_offset = min_dim * 0.3
+            
+            for circle in circles[0]:
+                cx, cy, r = circle
+                dist = np.sqrt((cx - center_x)**2 + (cy - center_y)**2)
+                
+                if dist < max_offset and dist < best_dist:
+                    best_dist = dist
+                    best_circle = circle
+            
+            if best_circle is not None:
+                r = int(best_circle[2])
+                
+                # Classificar pelo tamanho
+                # < 20% -> Small (Tower Top)
+                if r < min_dim * 0.20:
+                     return True, (int(best_circle[0]), int(best_circle[1])), r, 'tower_top'
+                else:
+                     return True, (int(best_circle[0]), int(best_circle[1])), r, 'hough'
+        
+        return False, None, None, None
+
     def detect_piece(self, square_img, pos=None):
         """
         Detecta se há peça circular/oval na casa.
@@ -304,27 +277,15 @@ class PieceDetector:
         if std_dev < 15:  # Threshold de uniformidade
             return result
         
-        # Método 1: Hough Circles (círculos perfeitos)
-        found_hough, center, radius = self._detect_circle_hough(gray)
+        # Método 1: Hough Circles Unificado (Grande e Pequeno)
+        found, center, radius, type_detected = self._detect_circle_unified(gray)
         
-        if found_hough:
+        if found:
             result['has_piece'] = True
             result['center'] = center
             result['radius'] = radius
-            result['method'] = 'hough'
-            result['confidence'] = 0.9
-            return result
-        
-
-        # Método 3: Círculo pequeno (topo de torre/cilindro)
-        found_small, center, radius = self._detect_small_circle(gray)
-        
-        if found_small:
-            result['has_piece'] = True
-            result['center'] = center
-            result['radius'] = radius
-            result['method'] = 'tower_top'
-            result['confidence'] = 0.75
+            result['method'] = type_detected
+            result['confidence'] = 0.9 if type_detected == 'hough' else 0.75
             return result
 
         
