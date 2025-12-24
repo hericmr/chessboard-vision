@@ -15,7 +15,6 @@ from queue import Queue
 import board_detection
 from grid_extractor import GridExtractor
 from calibration_module import CalibrationModule
-from change_detector import ChangeDetector
 from game_state import GameState
 from noise_handler import NoiseHandler, NoiseState
 from lichess_client import LichessClient
@@ -32,7 +31,7 @@ class LichessGame:
         self.game = GameState()
         self.lichess = LichessClient()
         self.noise = NoiseHandler()
-        self.detector = ChangeDetector()
+        self.noise = NoiseHandler()
         self.piece_detector = PieceDetector()  # Detecção de peças circulares
         
         # Threading
@@ -216,7 +215,7 @@ def main():
         if orientation_flipped:
             warped = cv2.rotate(warped, cv2.ROTATE_180)
         squares = grid.split_board(warped)
-        game.detector.calibrate(squares)
+        game.piece_detector.update_references(squares)
     
     print("\n✓ Tabuleiro calibrado!")
     print("\n[3/3] Conectando ao Lichess...")
@@ -261,9 +260,7 @@ def main():
         squares = grid.split_board(warped)
         sq_size = board_size // 8
         
-        # Detect changes (for noise handler)
-        changes = game.detector.detect_changes(squares)
-        current_changes = set(changes.keys())
+        # Detect changes phase eliminated (integrated into PieceDetector)
         
         # --- SMART SCAN LOGIC ---
         # Priorizar casas relevantes para o jogo
@@ -317,15 +314,16 @@ def main():
                  squares_to_check.add((visual_file, visual_rank))
         
         # Detect detect pieces (com Smart Scan)
-        piece_detections = game.piece_detector.detect_all_pieces(
+        # Detect detect pieces (com Smart Scan) e mudanças visuais
+        piece_detections, visual_changes = game.piece_detector.detect_all_pieces(
             squares, 
             use_delta=True, 
             squares_to_check=squares_to_check
         )
         vision_occupied = {pos for pos, info in piece_detections.items() if info['has_piece']}
         
-        # Process through noise handler
-        noise_state, noise_data = game.noise.process(current_changes)
+        # Process through noise handler (usando visual_changes do PieceDetector)
+        noise_state, noise_data = game.noise.process(visual_changes)
         
         # Detect lifted piece by comparing expected vs visual occupancy
         lifted_piece_square = None
@@ -433,48 +431,72 @@ def main():
         current_time = time.time()
         cooldown_ok = (current_time - game.last_move_time) > game.MOVE_COOLDOWN
         
-        # Movimento válido:
-        # - total_diff == 2: movimento normal (1 casa ficou vazia, 1 casa nova ocupada)
-        # - total_diff == 1: captura (1 casa ficou vazia, destino já estava ocupado)
-        # - total_diff == 4: ROQUE (2 casas vazias + 2 casas novas = rei e torre)
-        # - len(diff_missing) >= 1: pelo menos uma peça saiu do lugar
-        is_valid_diff = (
-            (total_diff == 2) or 
-            (total_diff == 1 and len(diff_missing) == 1) or
-            (total_diff == 4 and len(diff_missing) == 2 and len(diff_extra) == 2)  # Roque
-        )
+        # Movimento detectado (Fuzzy Logic):
+        # Tentar extrair UM movimento legal das diferenças visuais, ignorando ruído.
         
-        # DEBUG: mostrar estado atual
-        if total_diff > 0 and not game.waiting_for_opponent:
-            print(f"[DEBUG] diff={total_diff} missing={diff_missing} extra={diff_extra} stable={game.stable_count}/{game.STABILITY_REQUIRED} valid={is_valid_diff}")
+        detected_move = None
         
-        can_process = (
-            is_valid_diff and 
-            game.stable_count >= game.STABILITY_REQUIRED and
-            cooldown_ok and
-            not game.waiting_for_opponent
-        )
-        
-        if can_process:
-            # Usar process_occupancy_change para resolver o movimento
-            move, status = game.game.process_occupancy_change(vision_occupied)
+        if game.stable_count >= game.STABILITY_REQUIRED and cooldown_ok and not game.waiting_for_opponent:
+            diff_missing_list = list(diff_missing)
+            diff_extra_list = list(diff_extra)
+            possible_moves = []
             
-            if move:
-                print(f">>> MOVIMENTO DETECTADO: {move.uci()}")
-                
-                # Send to Lichess
-                if game.send_move_to_lichess(move):
-                    print(f"    Enviado ao Lichess ✓")
-                    game.last_move_time = current_time
-                else:
-                    print(f"    [!] Falha ao enviar")
-                    # Rollback
-                    game.game.board.pop()
+            # 1. Movimentos normais (Origem -> Destino Visual detectado)
+            # Tenta casar peças que sumiram com casas novas que apareceram
+            for orig in diff_missing_list:
+                 orig_idx = chess.square(orig[0], orig[1])
+                 for dest in diff_extra_list:
+                      dest_idx = chess.square(dest[0], dest[1])
+                      
+                      move_cand = chess.Move(orig_idx, dest_idx) 
+                      if move_cand not in game.game.board.legal_moves:
+                           # Tentar promoção automática para Rainha
+                           move_cand_promo = chess.Move(orig_idx, dest_idx, promotion=chess.QUEEN)
+                           if move_cand_promo in game.game.board.legal_moves:
+                               move_cand = move_cand_promo
+                      
+                      if move_cand in game.game.board.legal_moves:
+                           possible_moves.append(move_cand)
             
-            # Update reference (manter para compatibilidade)
-            game.detector.update_all_references(squares)
-            game.noise.reset()
-            game.stable_count = 0
+            # 2. Capturas (Origem -> Destino já Ocupado)
+            # Se a peça "sumiu" e não tem destino visual (diff_extra), pode ter ido para uma casa ocupada.
+            # Mesmo se tiver diff_extra (ruído), verificamos capturas possíveis.
+            for orig in diff_missing_list:
+                 orig_idx = chess.square(orig[0], orig[1])
+                 for move in game.game.board.legal_moves:
+                     if move.from_square == orig_idx and game.game.board.is_capture(move):
+                         # O destino de uma captura continua visualmente ocupado.
+                         # Devemos verificar se a casa destino está em vision_occupied.
+                         d_f = chess.square_file(move.to_square)
+                         d_r = chess.square_rank(move.to_square)
+                         if (d_f, d_r) in vision_occupied:
+                               possible_moves.append(move)
+
+            # Filtro de unicidade: Se houver apenas UM movimento legal plausível, execute-o.
+            unique_moves = list(set(possible_moves))
+            
+            if len(unique_moves) == 1:
+                detected_move = unique_moves[0]
+            elif len(unique_moves) > 1:
+                print(f"[Ambíguo] Multiplos movimentos: {unique_moves}")
+
+        
+        if detected_move:
+             print(f">>> MOVIMENTO ROBUSTO: {detected_move.uci()}")
+             game.game.board.push(detected_move) # Atualiza tabuleiro local
+             
+             # Send to Lichess
+             if game.send_move_to_lichess(detected_move):
+                 print(f"    Enviado ao Lichess ✓")
+                 game.last_move_time = current_time
+             else:
+                 print(f"    [!] Falha ao enviar")
+                 game.game.board.pop() # Rollback
+                     
+             # Update reference (força sincronia visual)
+             game.piece_detector.update_references(squares)
+             game.noise.reset()
+             game.stable_count = 0
         
         # Status
         turn = "VOCÊ" if not game.waiting_for_opponent else "OPONENTE"
@@ -489,7 +511,7 @@ def main():
         if key == ord('q'):
             break
         elif key == ord('c'):
-            game.detector.calibrate(squares)
+            game.piece_detector.update_references(squares)
             print("[RECALIBRADO]")
     
     # Cleanup

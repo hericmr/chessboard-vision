@@ -139,7 +139,7 @@ def main():
         sq_size = board_size // 8
         
         # Detectar peças (toggle delta e smooth)
-        results = calibrator.detector.detect_all_pieces(squares, use_delta=use_delta, use_smoothing=use_smoothing)
+        results, _ = calibrator.detector.detect_all_pieces(squares, use_delta=use_delta, use_smoothing=use_smoothing)
         
         # Visualização
         vis = warped.copy()

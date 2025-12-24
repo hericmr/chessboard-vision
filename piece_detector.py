@@ -327,9 +327,12 @@ class PieceDetector:
             squares_to_check: set of (file, rank) - se fornecido, força verificação nestas casas
             
         Returns:
-            dict: {(file, rank): detection_result}
+            (results, visual_changes)
+            results: dict {(file, rank): detection_result}
+            visual_changes: set {(file, rank)} das casas que mudaram visualmente
         """
         results = {}
+        visual_changes = set()
         processed_count = 0
         
         for pos, img in squares_dict.items():
@@ -337,6 +340,13 @@ class PieceDetector:
             
             # Decidir se deve processar esta casa
             should_process = False
+            has_changed_visual = False
+            
+            # Verificar mudança visual (Delta)
+            # Calculamos sempre para alimentar o NoiseHandler, mesmo se squares_to_check forçar processamento
+            if self._has_changed(pos, gray):
+                has_changed_visual = True
+                visual_changes.add(pos)
             
             # 1. Prioridade: Se está na lista de verificação obrigatória (regras)
             if squares_to_check is not None:
@@ -344,10 +354,9 @@ class PieceDetector:
                     should_process = True
             
             # 2. Se não foi forçado, verificar delta (visual)
-            # Se squares_to_check for None, processa tudo (respeitando delta)
             if not should_process:
                 if squares_to_check is None or use_delta: # Se delta ativo, verifica mudança
-                    if pos not in self.cached_results or self._has_changed(pos, gray):
+                    if pos not in self.cached_results or has_changed_visual:
                         should_process = True
             
             # Se a imagem mudou, processar novamente
@@ -399,13 +408,17 @@ class PieceDetector:
             
             results[pos] = raw_result
         
-        # Debug: mostrar quantas casas foram processadas
-        # if processed_count > 0:
-        #    print(f"[Delta] Processadas: {processed_count}/64")
-        
-        return results
+        return results, visual_changes
     
     def get_occupied_squares(self, squares_dict, use_smoothing=True):
         # Retorna conjunto de casas ocupadas.
-        results = self.detect_all_pieces(squares_dict, use_smoothing)
+        results, _ = self.detect_all_pieces(squares_dict, use_smoothing)
         return {pos for pos, info in results.items() if info['has_piece']}
+    
+    def update_references(self, squares_dict):
+        """Força atualização de todas as referências visuais e limpa cache."""
+        for pos, img in squares_dict.items():
+            gray = self._preprocess_square(img)
+            self._update_reference(pos, gray)
+        # Limpar cache para forçar reprocessamento delta na próxima vez
+        self.cached_results.clear()
