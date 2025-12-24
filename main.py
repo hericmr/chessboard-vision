@@ -8,6 +8,7 @@ Minimal version focused on detecting moves using change detection.
 import cv2
 import numpy as np
 import chess
+import time
 
 import board_detection
 from grid_extractor import GridExtractor
@@ -18,6 +19,7 @@ from game_state import GameState
 # Configuration
 CAMERA_ID = 0
 WIDTH, HEIGHT = 1280, 720
+SKIP_FRAMES = 2  # Process every Nth frame (1=all, 2=50%, 3=33%)
 
 
 def main():
@@ -70,10 +72,30 @@ def main():
     changed_squares = set()
     stable_count = 0
     
+    # Performance tracking
+    frame_count = 0
+    fps_start = time.time()
+    fps_display = 0
+    
     while True:
         success, img = cap.read()
         if not success:
             break
+        
+        # FPS counter
+        frame_count += 1
+        elapsed = time.time() - fps_start
+        if elapsed >= 1.0:
+            fps_display = frame_count / elapsed
+            frame_count = 0
+            fps_start = time.time()
+        
+        # Skip frames for performance (still capture for camera buffer)
+        if SKIP_FRAMES > 1 and frame_count % SKIP_FRAMES != 0:
+            cv2.imshow("Camera", img)  # Keep showing camera
+            if cv2.waitKey(1) & 0xFF == ord('q'):
+                break
+            continue
         
         # Warp board
         warped, _, board_size = board_detection.warp_image(img, points_ordered)
@@ -251,6 +273,8 @@ def main():
                    cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
         cv2.putText(vis, f"Turno: {'Brancas' if game.board.turn else 'Pretas'}", (10, 60),
                    cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1)
+        cv2.putText(vis, f"FPS: {fps_display:.1f}", (board_size - 100, 30),
+                   cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 255), 2)
         
         # Show
         cv2.imshow("Tabuleiro", vis)

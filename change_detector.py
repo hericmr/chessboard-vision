@@ -19,7 +19,7 @@ DEFAULT_SETTINGS = {
 
 
 class ChangeDetector:
-    """Detects CHANGES in squares from a reference state."""
+    """Detects CHANGES in squares from a reference state. Optimized."""
     
     def __init__(self):
         """Load settings from file or use defaults."""
@@ -27,9 +27,15 @@ class ChangeDetector:
         self.sensitivity = self.settings["sensitivity"]
         self.blur_kernel = self.settings["blur_kernel"]
         self.stable_frames = self.settings["stable_frames"]
-        self.reference_squares = {}
+        self.reference_squares = {}  # Stores pre-processed (gray+blur) images
         self.is_calibrated = False
+        self._kernel = max(1, self.blur_kernel | 1)  # Pre-calculate kernel
         print(f"[ChangeDetector] Sens: {self.sensitivity}, Blur: {self.blur_kernel}, Frames: {self.stable_frames}")
+    
+    def _preprocess(self, img):
+        """Convert to grayscale and apply blur (cached operation)."""
+        gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+        return cv2.GaussianBlur(gray, (self._kernel, self._kernel), 0)
     
     def _load_settings(self):
         """Load all settings from file."""
@@ -47,27 +53,19 @@ class ChangeDetector:
         return DEFAULT_SETTINGS.copy()
     
     def calibrate(self, squares_dict):
-        """Save current state as reference."""
+        """Save current state as reference (pre-processed)."""
         self.reference_squares = {}
         for pos, img in squares_dict.items():
-            self.reference_squares[pos] = img.copy()
+            self.reference_squares[pos] = self._preprocess(img)
         self.is_calibrated = True
         print(f"[ChangeDetector] Referência capturada ({len(self.reference_squares)} casas)")
     
-    def _calculate_difference(self, img1, img2):
-        """Calculate mean absolute difference between two images."""
-        if img1.shape != img2.shape:
-            img2 = cv2.resize(img2, (img1.shape[1], img1.shape[0]))
-        
-        gray1 = cv2.cvtColor(img1, cv2.COLOR_BGR2GRAY)
-        gray2 = cv2.cvtColor(img2, cv2.COLOR_BGR2GRAY)
-        
-        # Use blur from settings
-        k = max(1, self.blur_kernel | 1)
-        gray1 = cv2.GaussianBlur(gray1, (k, k), 0)
-        gray2 = cv2.GaussianBlur(gray2, (k, k), 0)
-        
-        diff = cv2.absdiff(gray1, gray2)
+    def _calculate_difference_fast(self, current_img, ref_processed):
+        """Fast comparison: current image vs pre-processed reference."""
+        current_processed = self._preprocess(current_img)
+        if current_processed.shape != ref_processed.shape:
+            current_processed = cv2.resize(current_processed, (ref_processed.shape[1], ref_processed.shape[0]))
+        diff = cv2.absdiff(current_processed, ref_processed)
         return np.mean(diff)
 
     
@@ -87,8 +85,8 @@ class ChangeDetector:
             if pos not in self.reference_squares:
                 continue
             
-            ref_img = self.reference_squares[pos]
-            diff = self._calculate_difference(current_img, ref_img)
+            ref_processed = self.reference_squares[pos]
+            diff = self._calculate_difference_fast(current_img, ref_processed)
             
             if diff > self.sensitivity:
                 changed[pos] = diff
@@ -96,13 +94,13 @@ class ChangeDetector:
         return changed
     
     def update_reference(self, pos, img):
-        """Update reference for a single square."""
-        self.reference_squares[pos] = img.copy()
+        """Update reference for a single square (pre-processed)."""
+        self.reference_squares[pos] = self._preprocess(img)
     
     def update_all_references(self, squares_dict):
         """Update all references (after confirmed move)."""
         for pos, img in squares_dict.items():
-            self.reference_squares[pos] = img.copy()
+            self.reference_squares[pos] = self._preprocess(img)
     
     # Compatibility methods
     def train(self, squares_dict):
