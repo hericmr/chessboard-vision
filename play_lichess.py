@@ -380,8 +380,17 @@ def main():
         # Movimento válido:
         # - total_diff == 2: movimento normal (1 casa ficou vazia, 1 casa nova ocupada)
         # - total_diff == 1: captura (1 casa ficou vazia, destino já estava ocupado)
+        # - total_diff == 4: ROQUE (2 casas vazias + 2 casas novas = rei e torre)
         # - len(diff_missing) >= 1: pelo menos uma peça saiu do lugar
-        is_valid_diff = (total_diff == 2) or (total_diff == 1 and len(diff_missing) == 1)
+        is_valid_diff = (
+            (total_diff == 2) or 
+            (total_diff == 1 and len(diff_missing) == 1) or
+            (total_diff == 4 and len(diff_missing) == 2 and len(diff_extra) == 2)  # Roque
+        )
+        
+        # DEBUG: mostrar estado atual
+        if total_diff > 0 and not game.waiting_for_opponent:
+            print(f"[DEBUG] diff={total_diff} missing={diff_missing} extra={diff_extra} stable={game.stable_count}/{game.STABILITY_REQUIRED} valid={is_valid_diff}")
         
         can_process = (
             is_valid_diff and 
@@ -416,11 +425,6 @@ def main():
         color_str = game.my_color or "?"
         cv2.putText(vis, f"Cor: {color_str.upper()} | Turno: {turn}", (10, 30),
                    cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 0), 2)
-        
-        # Debug: estabilidade e diferença
-        cv2.putText(vis, f"Diff: {total_diff} | Estab: {game.stable_count}/{game.STABILITY_REQUIRED}", 
-                   (10, 55), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (200, 200, 200), 1)
-        
         # Show
         cv2.imshow("Tabuleiro", vis)
         cv2.imshow("Camera", img)
