@@ -127,8 +127,17 @@ def main():
                         dest_f = chess.square_file(move.to_square)
                         dest_r = chess.square_rank(move.to_square)
                         legal_destinations.append((dest_f, dest_r))
+                
+                # OTIMIZAÇÃO: Ativar radar nas casas legais + origem
+                radar_squares = set(legal_destinations)
+                radar_squares.add(lifted_piece_square)
+                detector.set_focus_squares(radar_squares)
             else:
                 lifted_piece_square = None
+                detector.clear_focus()
+        elif noise_state == NoiseState.IDLE:
+            # Sem peça levantada, monitorar todas as casas
+            detector.clear_focus()
         
         # Draw visualization
         vis = warped.copy()
@@ -289,6 +298,14 @@ def main():
                    cv2.FONT_HERSHEY_SIMPLEX, 0.7, status_color, 2)
         cv2.putText(vis, f"Turno: {'Brancas' if game.board.turn else 'Pretas'}", (10, 60),
                    cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1)
+        
+        # Radar indicator
+        focus_count = detector.get_focus_count()
+        radar_text = f"Radar: {focus_count}/64" if focus_count < 64 else "Radar: OFF"
+        radar_color = (0, 255, 0) if focus_count < 64 else (128, 128, 128)
+        cv2.putText(vis, radar_text, (10, 85),
+                   cv2.FONT_HERSHEY_SIMPLEX, 0.5, radar_color, 1)
+        
         cv2.putText(vis, f"FPS: {fps_display:.1f} | {state_name}", (board_size - 180, 30),
                    cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 255), 2)
         

@@ -19,11 +19,11 @@ from change_detector import ChangeDetector
 from game_state import GameState
 from noise_handler import NoiseHandler, NoiseState
 from lichess_client import LichessClient
+from piece_detector import PieceDetector
 
 # Configuration
 CAMERA_ID = 0
 WIDTH, HEIGHT = 1280, 720
-
 
 class LichessGame:
     """Manages a game between physical board and Lichess."""
@@ -33,6 +33,7 @@ class LichessGame:
         self.lichess = LichessClient()
         self.noise = NoiseHandler()
         self.detector = ChangeDetector()
+        self.piece_detector = PieceDetector()  # Detecção de peças circulares
         
         # Threading
         self.move_queue = Queue()
@@ -44,6 +45,13 @@ class LichessGame:
         self.game_id = None
         self.waiting_for_opponent = False
         self.last_lichess_moves = ""
+        
+        # Estabilização temporal
+        self.stable_occupancy = None
+        self.stable_count = 0
+        self.STABILITY_REQUIRED = 15  # Frames necessários para confirmar
+        self.last_move_time = 0
+        self.MOVE_COOLDOWN = 1.5  # Segundos entre movimentos
         
     def connect_lichess(self) -> bool:
         """Connect to Lichess."""
@@ -252,19 +260,29 @@ def main():
         squares = grid.split_board(warped)
         sq_size = board_size // 8
         
-        # Detect changes
+        # Detect changes (for noise handler)
         changes = game.detector.detect_changes(squares)
         current_changes = set(changes.keys())
+        
+        # Detect pieces (NEW - circular detection)
+        piece_detections = game.piece_detector.detect_all_pieces(squares)
+        vision_occupied = {pos for pos, info in piece_detections.items() if info['has_piece']}
         
         # Process through noise handler
         noise_state, noise_data = game.noise.process(current_changes)
         
-        # Detect lifted piece and legal moves
+        # Detect lifted piece by comparing expected vs visual occupancy
         lifted_piece_square = None
         legal_destinations = []
         
-        if len(current_changes) == 1 and not game.waiting_for_opponent:
-            pos = list(current_changes)[0]
+        # Comparar ocupação esperada (lógica) com visual (PieceDetector)
+        expected_occupied = game.game.get_board_occupancy()
+        
+        # Peças que estão no tabuleiro lógico mas NÃO na visão = levantadas
+        lifted_squares = expected_occupied - vision_occupied
+        
+        if len(lifted_squares) == 1 and not game.waiting_for_opponent:
+            pos = list(lifted_squares)[0]
             f, r = pos
             sq_idx = chess.square(f, r)
             piece = game.game.board.piece_at(sq_idx)
@@ -285,6 +303,9 @@ def main():
         for i in range(9):
             cv2.line(vis, (i * sq_size, 0), (i * sq_size, board_size), (50, 50, 50), 1)
             cv2.line(vis, (0, i * sq_size), (board_size, i * sq_size), (50, 50, 50), 1)
+        
+        # NÃO desenhar círculos frame-a-frame (instável)
+        # A visualização é feita pelas peças do tabuleiro lógico abaixo
         
         # Noise overlay
         if noise_state == NoiseState.NOISE_ACTIVE:
@@ -336,22 +357,41 @@ def main():
                     cv2.putText(vis, sym, (x - 15, y + 10),
                                cv2.FONT_HERSHEY_SIMPLEX, 1.2, color, 2)
         
-        # Process move when stable and it's my turn
-        if (noise_data.get("stable") and 
-            noise_data.get("squares") and 
-            not game.waiting_for_opponent):
-            
-            move_squares = noise_data["squares"]
-            
-            # Build vision occupancy
-            vision_occupied = game.game.get_board_occupancy().copy()
-            for pos in move_squares:
-                if pos in vision_occupied:
-                    vision_occupied.remove(pos)
-                else:
-                    vision_occupied.add(pos)
-            
-            # Resolve move
+        # Process move using PieceDetector com ESTABILIZAÇÃO TEMPORAL
+        expected_occupied = game.game.get_board_occupancy()
+        
+        # Casas que mudaram
+        diff_missing = expected_occupied - vision_occupied  # Peças que saíram
+        diff_extra = vision_occupied - expected_occupied    # Peças que apareceram
+        
+        total_diff = len(diff_missing) + len(diff_extra)
+        
+        # Verificar estabilidade da ocupação
+        if game.stable_occupancy == vision_occupied:
+            game.stable_count += 1
+        else:
+            game.stable_occupancy = vision_occupied.copy()
+            game.stable_count = 1
+        
+        # Cooldown entre movimentos
+        current_time = time.time()
+        cooldown_ok = (current_time - game.last_move_time) > game.MOVE_COOLDOWN
+        
+        # Movimento válido:
+        # - total_diff == 2: movimento normal (1 casa ficou vazia, 1 casa nova ocupada)
+        # - total_diff == 1: captura (1 casa ficou vazia, destino já estava ocupado)
+        # - len(diff_missing) >= 1: pelo menos uma peça saiu do lugar
+        is_valid_diff = (total_diff == 2) or (total_diff == 1 and len(diff_missing) == 1)
+        
+        can_process = (
+            is_valid_diff and 
+            game.stable_count >= game.STABILITY_REQUIRED and
+            cooldown_ok and
+            not game.waiting_for_opponent
+        )
+        
+        if can_process:
+            # Usar process_occupancy_change para resolver o movimento
             move, status = game.game.process_occupancy_change(vision_occupied)
             
             if move:
@@ -360,20 +400,26 @@ def main():
                 # Send to Lichess
                 if game.send_move_to_lichess(move):
                     print(f"    Enviado ao Lichess ✓")
+                    game.last_move_time = current_time
                 else:
                     print(f"    [!] Falha ao enviar")
                     # Rollback
                     game.game.board.pop()
             
-            # Update reference
+            # Update reference (manter para compatibilidade)
             game.detector.update_all_references(squares)
             game.noise.reset()
+            game.stable_count = 0
         
         # Status
         turn = "VOCÊ" if not game.waiting_for_opponent else "OPONENTE"
         color_str = game.my_color or "?"
         cv2.putText(vis, f"Cor: {color_str.upper()} | Turno: {turn}", (10, 30),
                    cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 0), 2)
+        
+        # Debug: estabilidade e diferença
+        cv2.putText(vis, f"Diff: {total_diff} | Estab: {game.stable_count}/{game.STABILITY_REQUIRED}", 
+                   (10, 55), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (200, 200, 200), 1)
         
         # Show
         cv2.imshow("Tabuleiro", vis)

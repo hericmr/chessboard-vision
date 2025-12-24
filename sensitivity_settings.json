@@ -1,5 +1,9 @@
 {
-    "sensitivity": 8,
-    "blur_kernel": 12,
-    "stable_frames": 3
+  "sensitivity": 8,
+  "blur_kernel": 13,
+  "stable_frames": 10,
+  "z_threshold": 2.55,
+  "alpha": 0.13,
+  "initial_variance": 600,
+  "use_gaussian": true
 }
