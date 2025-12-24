@@ -1,259 +1,272 @@
+#!/usr/bin/env python3
+"""
+Chess Vision - Simple Move Detection
+
+Minimal version focused on detecting moves using change detection.
+"""
+
 import cv2
 import numpy as np
-import cvzone
-# from piece_recognition import PieceRecognizer # REMOVED
-from state_tracker import StateTracker
-import board_detection
-import fen_generator
-# from move_detector import detect_move # Now used inside StableMoveDetector
-from stable_move_detector import StableMoveDetector
-from grid_extractor import GridExtractor
-from square_classifier import SquareClassifier
+import chess
 
-# ---------------------------------------------------------------------------
+import board_detection
+from grid_extractor import GridExtractor
+from calibration_module import CalibrationModule
+from change_detector import ChangeDetector
+from game_state import GameState
+
 # Configuration
-# ---------------------------------------------------------------------------
 CAMERA_ID = 0
 WIDTH, HEIGHT = 1280, 720
-DISPLAY_SIZE = (1280, 720)
-BOARD_MARGIN = 100
-CROP_OFFSET = 0
-
-# ---------------------------------------------------------------------------
-# Globals for Mouse Callback
-# ---------------------------------------------------------------------------
-mouse_start = (-1, -1)
-mouse_current = (-1, -1)
-is_drawing = False
-roi_selected = False
-selection_rect = None
-
-def mouse_callback(event, x, y, flags, param):
-    global mouse_start, mouse_current, is_drawing, roi_selected, selection_rect
-    
-    if event == cv2.EVENT_LBUTTONDOWN:
-        is_drawing = True
-        roi_selected = False
-        mouse_start = (x, y)
-        mouse_current = (x, y)
-        
-    elif event == cv2.EVENT_MOUSEMOVE:
-        if is_drawing:
-            # We don't need to "draw" here, just update current pos
-            mouse_current = (x, y)
-            
-    elif event == cv2.EVENT_LBUTTONUP:
-        is_drawing = False
-        roi_selected = True
-        mouse_current = (x, y)
-        # Normalize rect (handle drawing backwards)
-        x1, y1 = mouse_start
-        x2, y2 = mouse_current
-        # Ensure we have a valid rect even if just a click
-        if abs(x1-x2) > 5 and abs(y1-y2) > 5:
-            selection_rect = (min(x1, x2), min(y1, y2), abs(x1-x2), abs(y1-y2))
-        else:
-            roi_selected = False
-            selection_rect = None
-            print("selecao muito pequena, ignorada.")
 
 
 def main():
-    global roi_selected, is_drawing, selection_rect, mouse_current, mouse_start
-    
-    # Initialize components
+    # Initialize camera
     cap = cv2.VideoCapture(CAMERA_ID)
     cap.set(3, WIDTH)
     cap.set(4, HEIGHT)
     
-    grid_extractor = GridExtractor()
-    classifier = SquareClassifier()
-    # tracker = StateTracker(history_length=5) # Kept for 'smooth' display if needed, but logic uses Stable
-    move_detector = StableMoveDetector(stability_threshold=15)
+    # Phase 1: Board Calibration
+    print("=== CALIBRAÇÃO DO TABULEIRO ===")
+    calib = CalibrationModule()
+    config = calib.run(cap)
     
-    board_detection_mode = True
-    board_corners = None
-    rotation_state = 0
-    debug_mode = False
+    if config is None:
+        print("Calibração cancelada.")
+        cap.release()
+        cv2.destroyAllWindows()
+        return
     
-    # last_confirmed_fen = None # Managed by move_detector now
+    corners = config["corners"]
+    player_color = config["player_color"]
+    orientation_flipped = config.get("orientation_flipped", False)
     
-    print("iniciando sistema de visao de xadrez (GRID-BASED)...")
-    print("PASSO 1: CONFIGURAÇÃO INICIAL")
-    print("   Certifique-se que o tabuleiro está na POSIÇÃO INICIAL (todas as peças).")
-    print("   1. Desenhe o retangulo.")
-    print("   2. Pressione 'c' para confirmar e CALIBRAR.")
-    print("   3. O sistema aprendera a aparencia das pecas.")
-    print("   4. Pressione 'r' para RESETAR se precisar.")
-    print("   5. Pressione 'q' para sair.")
+    board_corners = np.array(corners).reshape((4, 1, 2))
+    points_ordered = board_detection.reorder(board_corners)
     
-    window_name = "visao de xadrez"
-    cv2.namedWindow(window_name)
-    cv2.setMouseCallback(window_name, mouse_callback)
+    # Phase 2: Initialize
+    grid = GridExtractor()
+    game = GameState()
+    detector = ChangeDetector()  # Loads sensitivity from file
+    
+    print(f"\n=== JOGO INICIADO ===")
+    print(f"Jogador: {player_color}")
+    print("Pressione 'q' para sair, 'c' para recalibrar\n")
+    
+    # Capture initial reference
+    for _ in range(10):
+        cap.read()
+    
+    success, img = cap.read()
+    if success:
+        warped, _, _ = board_detection.warp_image(img, points_ordered)
+        if orientation_flipped:
+            warped = cv2.rotate(warped, cv2.ROTATE_180)
+        squares = grid.split_board(warped)
+        detector.calibrate(squares)
+    
+    # State tracking
+    move_pending = False
+    changed_squares = set()
+    stable_count = 0
     
     while True:
         success, img = cap.read()
         if not success:
             break
-            
-        img_display = img.copy()
         
-        if board_detection_mode:
-            # -------------------------------------------------------
-            # 1. Manual Selection Mode
-            # -------------------------------------------------------
-            # Draw temporary box while dragging
-            if is_drawing:
-                cv2.rectangle(img_display, mouse_start, mouse_current, (0, 255, 255), 2)
+        # Warp board
+        warped, _, board_size = board_detection.warp_image(img, points_ordered)
+        if orientation_flipped:
+            warped = cv2.rotate(warped, cv2.ROTATE_180)
+        
+        squares = grid.split_board(warped)
+        sq_size = board_size // 8
+        
+        # Detect changes
+        changes = detector.detect_changes(squares)
+        current_changes = set(changes.keys())
+        
+        # Detect if a piece is being lifted (single square changed)
+        lifted_piece_square = None
+        legal_destinations = []
+        
+        if len(current_changes) == 1:
+            pos = list(current_changes)[0]
+            f, r = pos
+            sq_idx = chess.square(f, r)
+            piece = game.board.piece_at(sq_idx)
             
-            # Show fixed selection if made
-            if roi_selected and selection_rect is not None:
-                x, y, w, h = selection_rect
-                cv2.rectangle(img_display, (x, y), (x+w, y+h), (0, 255, 0), 2)
-                cvzone.putTextRect(img_display, "tabuleiro selecionado! certifique-se que esta na posicao inicial!", (50, 20), scale=1.5, thickness=2, colorR=(0,0,0), colorT=(0,255,255), offset=10)
-                cvzone.putTextRect(img_display, "'c' confirmar e CALIBRAR", (50, 60), scale=2, thickness=2, colorR=(0,0,0), colorT=(0,255,0), offset=10)
+            if piece and piece.color == game.board.turn:
+                lifted_piece_square = pos
+                # Get all legal moves from this square
+                for move in game.board.legal_moves:
+                    if move.from_square == sq_idx:
+                        dest_f = chess.square_file(move.to_square)
+                        dest_r = chess.square_rank(move.to_square)
+                        legal_destinations.append((dest_f, dest_r))
+        
+        # Draw simple visualization
+        vis = warped.copy()
+        
+        # Draw grid lines
+        for i in range(9):
+            cv2.line(vis, (i * sq_size, 0), (i * sq_size, board_size), (50, 50, 50), 1)
+            cv2.line(vis, (0, i * sq_size), (board_size, i * sq_size), (50, 50, 50), 1)
+        
+        # Draw legal destinations (optimized - single overlay)
+        if legal_destinations:
+            overlay = vis.copy()
+            for dest in legal_destinations:
+                df, dr = dest
+                dc, drow = df, 7 - dr
+                cv2.rectangle(overlay,
+                    (dc * sq_size, drow * sq_size),
+                    ((dc + 1) * sq_size, (drow + 1) * sq_size),
+                    (255, 150, 0), -1)
+            cv2.addWeighted(overlay, 0.3, vis, 0.7, 0, vis)
+        
+        for f in range(8):
+            for r in range(8):
+                pos = (f, r)
+                col = f
+                row = 7 - r
+                x = col * sq_size + sq_size // 2
+                y = row * sq_size + sq_size // 2
                 
-                # Check for confirm
-                key = cv2.waitKey(1) & 0xFF
-                if key == ord('c'):
-                    # Convert rect to corners for warp_image (TL, TR, BR, BL)
-                    board_corners = np.array([
-                        [[x, y]],
-                        [[x+w, y]],
-                        [[x+w, y+h]],
-                        [[x, y+h]]
-                    ], dtype=np.int32)
-                    
-                    # ---------------------------------------
-                    # CALIBRATION SEQUENCE
-                    # ---------------------------------------
-                    print("Calibrando...")
-                    # 1. Warp current frame - using board_detection logic
-                    # Ensure corners are reshaped correctly for reorder
-                    corners_reshaped = board_corners.reshape(4, 2)
-                    points_ordered = board_detection.reorder(corners_reshaped)
-                    img_warped, matrix, board_size = board_detection.warp_image(img, points_ordered)
-                    
-                    # 2. Extract Squares
-                    squares = grid_extractor.split_board(img_warped)
-                    
-                    # 3. Train Classifier
-                    classifier.train(squares)
-                    
-                    board_detection_mode = False
-                    rotation_state = 0
-                    print("Sistema Calibrado! Pode mover as pecas.")
-                    
-                elif key == ord('r'):
-                    roi_selected = False
-                    selection_rect = None
-                    print("selecao resetada.")
-            
+                # Get piece from game logic
+                sq_idx = chess.square(f, r)
+                piece = game.board.piece_at(sq_idx)
+                
+                # Highlight lifted piece square with blue
+                if pos == lifted_piece_square:
+                    cv2.rectangle(vis,
+                        (col * sq_size + 3, row * sq_size + 3),
+                        ((col + 1) * sq_size - 3, (row + 1) * sq_size - 3),
+                        (255, 0, 0), 4)  # Blue = piece lifted
+                elif pos in current_changes:
+                    # Other changed squares in yellow
+                    cv2.rectangle(vis,
+                        (col * sq_size + 3, row * sq_size + 3),
+                        ((col + 1) * sq_size - 3, (row + 1) * sq_size - 3),
+                        (0, 255, 255), 3)  # Yellow = changed
+                
+                # Draw piece symbol
+                if piece:
+                    sym = piece.symbol()
+                    color = (255, 255, 255) if piece.color == chess.WHITE else (0, 0, 0)
+                    bg = (0, 0, 0) if piece.color == chess.WHITE else (255, 255, 255)
+                    cv2.putText(vis, sym, (x - 15, y + 10),
+                               cv2.FONT_HERSHEY_SIMPLEX, 1.2, bg, 4)
+                    cv2.putText(vis, sym, (x - 15, y + 10),
+                               cv2.FONT_HERSHEY_SIMPLEX, 1.2, color, 2)
+        
+        # Move detection logic
+        if current_changes:
+            if current_changes == changed_squares:
+                stable_count += 1
             else:
-                 # No selection yet
-                 cvzone.putTextRect(img_display, "desenhe o retangulo no tabuleiro", (50, 50), scale=2, thickness=2, colorR=(0, 0, 255), offset=10)
-
-            cv2.imshow(window_name, img_display)
-
+                changed_squares = current_changes
+                stable_count = 0
+                move_pending = True
         else:
-            # -------------------------------------------------------
-            # 2. Gameplay Mode (Grid Classification)
-            # -------------------------------------------------------
-            # Recalculate warp for current frame (using same corners)
-            corners_reshaped = board_corners.reshape(4, 2)
-            points_ordered = board_detection.reorder(corners_reshaped)
-            img_warped, matrix, board_size = board_detection.warp_image(img, points_ordered)
+            if move_pending and stable_count > 0:
+                # No changes now, but we had pending changes
+                # This might be a completed move
+                stable_count += 1
+        
+        # Check if stable enough to process move
+        if move_pending and len(changed_squares) == 2 and stable_count >= detector.stable_frames:
+            # Two squares changed = potential move
+            sq_list = list(changed_squares)
             
-            # Draw Grid lines on visualization
-            img_vis = img_warped.copy()
-            img_vis = board_detection.draw_chess_grid(img_vis, board_size)
+            # Get the squares
+            pos1, pos2 = sq_list[0], sq_list[1]
+            f1, r1 = pos1
+            f2, r2 = pos2
+            sq1 = chess.square(f1, r1)
+            sq2 = chess.square(f2, r2)
             
-            # Extract current squares
-            squares = grid_extractor.split_board(img_warped)
+            piece1 = game.board.piece_at(sq1)
+            piece2 = game.board.piece_at(sq2)
             
-            # Classify and Build Map
-            board_map = {}
-            for (f, r), sq_img in squares.items():
-                label = classifier.predict(sq_img)
+            # Determine origin and destination
+            # Origin = square that HAS a piece in game state
+            # Destination = square that's empty OR has enemy piece (capture)
+            if piece1 and not piece2:
+                pos_from, pos_to = pos1, pos2
+            elif piece2 and not piece1:
+                pos_from, pos_to = pos2, pos1
+            elif piece1 and piece2:
+                # Both have pieces - it's a capture. 
+                # Origin is the piece of current turn
+                if piece1.color == game.board.turn:
+                    pos_from, pos_to = pos1, pos2
+                else:
+                    pos_from, pos_to = pos2, pos1
+            else:
+                pos_from, pos_to = None, None
+            
+            if pos_from and pos_to:
+                f_from, r_from = pos_from
+                f_to, r_to = pos_to
+                move_uci = f"{chr(97+f_from)}{r_from+1}{chr(97+f_to)}{r_to+1}"
                 
-                # Only add if it's a piece (not None/Empty) for visuals, 
-                # but for FEN we might need to know emptiness?
-                # Actually fen_generator usually iterates 8x8 and checks the map.
-                # If key missing -> empty.
-                if label and label != 'empty':
-                    board_map[(f, r)] = {'fen': label}
-                    
-                    # Draw on Vis
-                    square_size = board_size // 8
-                    # Visual coords (f=0 is left/a, r=0 is bottom/1 in logic)
-                    # GridExtractor: (0,0) is A1 (Bottom Left visually if Rank 1 is bottom)
-                    # BUT GridExtractor loop: 
-                    # r=0 (Top/Rank8), c=0 (Left/FileA) -> logical (0, 7)
-                    # Wait, GridExtractor implementation:
-                    # logical_file = c
-                    # logical_rank = 7 - r
-                    # So pixel (0,0) is (File 0, Rank 7) -> A8. Correct.
-                    
-                    # Visual Drawing:
-                    # We want to draw at pixel corresponding to (f, r).
-                    # r is logical rank index (0=Rank1, 7=Rank8).
-                    # Visual row index (0=Top, 7=Bottom) = 7 - r.
-                    # f is logical file index (0=A, 7=H).
-                    # Visual col index = f.
-                    
-                    vis_row = 7 - r
-                    vis_col = f
-                    
-                    px = int(vis_col * square_size + square_size / 2)
-                    py = int(vis_row * square_size + square_size / 2)
-                    
-                    # Color based on piece case?
-                    color = (0, 0, 255) # Red for all for now, or distinguish
-                    if label.isupper(): # White
-                        color = (255, 255, 255)
-                    else: # Black
-                        color = (0, 0, 0)
+                try:
+                    move = chess.Move.from_uci(move_uci)
+                    if move in game.board.legal_moves:
+                        game.board.push(move)
+                        print(f">>> MOVIMENTO: {move_uci}")
                         
-                    cv2.putText(img_vis, label, (px-10, py+10), cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 255, 255), 2)
+                        if game.board.is_check():
+                            print("    XEQUE!")
+                        if game.board.is_game_over():
+                            print(f"    FIM DE JOGO: {game.board.result()}")
+                    else:
+                        # Try reverse direction
+                        move_uci_rev = f"{chr(97+f_to)}{r_to+1}{chr(97+f_from)}{r_from+1}"
+                        move_rev = chess.Move.from_uci(move_uci_rev)
+                        if move_rev in game.board.legal_moves:
+                            game.board.push(move_rev)
+                            print(f">>> MOVIMENTO: {move_uci_rev}")
+                        else:
+                            print(f"[!] Movimento ilegal: {move_uci}")
+                except Exception as e:
+                    print(f"[!] Erro: {e}")
             
-            # Generate FEN
-            current_fen = fen_generator.generate_fen(board_map)
+            # Always update reference after processing
+            detector.update_all_references(squares)
             
-            # Update State Machine
-            move = move_detector.process(current_fen)
-            stability_status = move_detector.get_status()
-            
-            # Display Status
-            cv2.putText(img, f"Status: {stability_status}", (10, 30), cv2.FONT_HERSHEY_PLAIN, 1.5, (0, 255, 0), 2)
-            cv2.putText(img, f"FEN: {move_detector.confirmed_fen if move_detector.confirmed_fen else '...'}", (10, 60), cv2.FONT_HERSHEY_PLAIN, 1.0, (200, 200, 200), 1)
-            
-            if move:
-                print(f"[movimento confirmado] {move}")
-            elif "Estabilizando" in stability_status:
-                # Optional: print debug only occasionally or just rely on UI
-                # print(f"[debug] {stability_status}") 
-                pass
-                
-            # Show images
-            cv2.imshow("visao de xadrez - principal", img)
-            cv2.imshow("visao de xadrez - processado", img_vis)
-
-        # Key Controls
+            # Reset
+            move_pending = False
+            changed_squares = set()
+            stable_count = 0
+        
+        # Status display
+        status = "AGUARDANDO"
+        if move_pending:
+            status = f"DETECTANDO... ({len(changed_squares)} mudanças)"
+        
+        cv2.putText(vis, status, (10, 30),
+                   cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
+        cv2.putText(vis, f"Turno: {'Brancas' if game.board.turn else 'Pretas'}", (10, 60),
+                   cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1)
+        
+        # Show
+        cv2.imshow("Tabuleiro", vis)
+        cv2.imshow("Camera", img)
+        
         key = cv2.waitKey(1) & 0xFF
         if key == ord('q'):
             break
-        elif key == ord('r'):
-             board_detection_mode = True
-             roi_selected = False
-             selection_rect = None
-             print("RESET: Re-calibrar.")
-             try:
-                 cv2.destroyWindow("visao de xadrez - processado")
-             except:
-                 pass
-        
+        elif key == ord('c'):
+            # Recapture reference
+            detector.calibrate(squares)
+            print("[RECALIBRADO]")
+    
     cap.release()
     cv2.destroyAllWindows()
+
 
 if __name__ == "__main__":
     main()

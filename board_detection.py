@@ -108,3 +108,39 @@ def draw_chess_grid(img, board_size):
         cv2.putText(img, str(rank), (x, y), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 255, 255), 2)
 
     return img
+
+def draw_chess_grid_dynamic(img, board_size, orientation="WHITE"):
+    """
+    Draw grid lines and coordinate labels on the warped chessboard.
+    orientation: "WHITE" (Standard, a1 at bottom-left)
+                 "BLACK" (Rotated, h8 at bottom-left)
+    """
+    square_size = board_size // 8
+    
+    # Draw Lines
+    for i in range(1, 8):
+        cv2.line(img, (i * square_size, 0), (i * square_size, board_size), (255, 255, 255), 2)
+        cv2.line(img, (0, i * square_size), (board_size, i * square_size), (255, 255, 255), 2)
+        
+    # Draw Labels
+    # Files (a-h) on bottom edge
+    if orientation == "WHITE":
+        files = ['a', 'b', 'c', 'd', 'e', 'f', 'g', 'h']
+        ranks = [8, 7, 6, 5, 4, 3, 2, 1] # Top to Bottom
+    else:
+        files = ['h', 'g', 'f', 'e', 'd', 'c', 'b', 'a'] # Reversed
+        ranks = [1, 2, 3, 4, 5, 6, 7, 8] # Reversed
+        
+    for i, f in enumerate(files):
+        x = int(i * square_size + square_size / 2) - 10
+        y = board_size - 10
+        cv2.putText(img, f, (x, y), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 255, 255), 2)
+
+    # Ranks (1-8) on left edge
+    for i in range(8):
+        rank = ranks[i]
+        x = 5
+        y = int(i * square_size + square_size / 2) + 10
+        cv2.putText(img, str(rank), (x, y), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 255, 255), 2)
+
+    return img
