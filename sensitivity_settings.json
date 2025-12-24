@@ -1,5 +1,5 @@
 {
-    "sensitivity": 9,
+    "sensitivity": 8,
     "blur_kernel": 12,
-    "stable_frames": 2
+    "stable_frames": 3
 }

@@ -15,6 +15,7 @@ from grid_extractor import GridExtractor
 from calibration_module import CalibrationModule
 from change_detector import ChangeDetector
 from game_state import GameState
+from noise_handler import NoiseHandler, NoiseState
 
 # Configuration
 CAMERA_ID = 0
@@ -50,6 +51,7 @@ def main():
     grid = GridExtractor()
     game = GameState()
     detector = ChangeDetector()  # Loads sensitivity from file
+    noise = NoiseHandler()  # State machine for noise handling
     
     print(f"\n=== JOGO INICIADO ===")
     print(f"Jogador: {player_color}")
@@ -67,10 +69,8 @@ def main():
         squares = grid.split_board(warped)
         detector.calibrate(squares)
     
-    # State tracking
-    move_pending = False
-    changed_squares = set()
-    stable_count = 0
+    # State tracking (now handled by NoiseHandler)
+    last_move_squares = set()
     
     # Performance tracking
     frame_count = 0
@@ -109,26 +109,28 @@ def main():
         changes = detector.detect_changes(squares)
         current_changes = set(changes.keys())
         
-        # Detect if a piece is being lifted (single square changed)
-        lifted_piece_square = None
+        # Process through noise handler state machine
+        noise_state, noise_data = noise.process(current_changes)
+        
+        # Get lifted piece info from noise handler
+        lifted_piece_square = noise_data.get("lifted")
         legal_destinations = []
         
-        if len(current_changes) == 1:
-            pos = list(current_changes)[0]
-            f, r = pos
+        if lifted_piece_square:
+            f, r = lifted_piece_square
             sq_idx = chess.square(f, r)
             piece = game.board.piece_at(sq_idx)
             
             if piece and piece.color == game.board.turn:
-                lifted_piece_square = pos
-                # Get all legal moves from this square
                 for move in game.board.legal_moves:
                     if move.from_square == sq_idx:
                         dest_f = chess.square_file(move.to_square)
                         dest_r = chess.square_rank(move.to_square)
                         legal_destinations.append((dest_f, dest_r))
+            else:
+                lifted_piece_square = None
         
-        # Draw simple visualization
+        # Draw visualization
         vis = warped.copy()
         
         # Draw grid lines
@@ -136,8 +138,16 @@ def main():
             cv2.line(vis, (i * sq_size, 0), (i * sq_size, board_size), (50, 50, 50), 1)
             cv2.line(vis, (0, i * sq_size), (board_size, i * sq_size), (50, 50, 50), 1)
         
-        # Draw legal destinations (optimized - single overlay)
-        if legal_destinations:
+        # NOISE overlay - red tint when hand detected
+        if noise_state == NoiseState.NOISE_ACTIVE:
+            overlay = vis.copy()
+            overlay[:] = (0, 0, 80)  # Dark red tint
+            cv2.addWeighted(overlay, 0.3, vis, 0.7, 0, vis)
+            cv2.putText(vis, "MAO DETECTADA", (board_size//2 - 120, board_size//2),
+                       cv2.FONT_HERSHEY_SIMPLEX, 1.0, (0, 0, 255), 3)
+        
+        # Draw legal destinations
+        elif legal_destinations:
             overlay = vis.copy()
             for dest in legal_destinations:
                 df, dr = dest
@@ -148,6 +158,8 @@ def main():
                     (255, 150, 0), -1)
             cv2.addWeighted(overlay, 0.3, vis, 0.7, 0, vis)
         
+        # Draw board squares and pieces
+        pending_squares = noise_data.get("squares", set())
         for f in range(8):
             for r in range(8):
                 pos = (f, r)
@@ -156,18 +168,16 @@ def main():
                 x = col * sq_size + sq_size // 2
                 y = row * sq_size + sq_size // 2
                 
-                # Get piece from game logic
                 sq_idx = chess.square(f, r)
                 piece = game.board.piece_at(sq_idx)
                 
-                # Highlight lifted piece square with blue
+                # Highlight squares
                 if pos == lifted_piece_square:
                     cv2.rectangle(vis,
                         (col * sq_size + 3, row * sq_size + 3),
                         ((col + 1) * sq_size - 3, (row + 1) * sq_size - 3),
                         (255, 0, 0), 4)  # Blue = piece lifted
-                elif pos in current_changes:
-                    # Other changed squares in yellow
+                elif pos in pending_squares:
                     cv2.rectangle(vis,
                         (col * sq_size + 3, row * sq_size + 3),
                         ((col + 1) * sq_size - 3, (row + 1) * sq_size - 3),
@@ -183,97 +193,103 @@ def main():
                     cv2.putText(vis, sym, (x - 15, y + 10),
                                cv2.FONT_HERSHEY_SIMPLEX, 1.2, color, 2)
         
-        # Move detection logic
-        if current_changes:
-            if current_changes == changed_squares:
-                stable_count += 1
-            else:
-                changed_squares = current_changes
-                stable_count = 0
-                move_pending = True
-        else:
-            if move_pending and stable_count > 0:
-                # No changes now, but we had pending changes
-                # This might be a completed move
-                stable_count += 1
-        
-        # Check if stable enough to process move
-        if move_pending and len(changed_squares) == 2 and stable_count >= detector.stable_frames:
-            # Two squares changed = potential move
-            sq_list = list(changed_squares)
+        # Process move when stable
+        if noise_data.get("stable") and noise_data.get("squares"):
+            move_squares = noise_data["squares"]
             
-            # Get the squares
-            pos1, pos2 = sq_list[0], sq_list[1]
-            f1, r1 = pos1
-            f2, r2 = pos2
-            sq1 = chess.square(f1, r1)
-            sq2 = chess.square(f2, r2)
+            # Build vision occupancy grid for GameState
+            # Start with current game state occupancy
+            vision_occupied = game.get_board_occupancy().copy()
             
-            piece1 = game.board.piece_at(sq1)
-            piece2 = game.board.piece_at(sq2)
-            
-            # Determine origin and destination
-            # Origin = square that HAS a piece in game state
-            # Destination = square that's empty OR has enemy piece (capture)
-            if piece1 and not piece2:
-                pos_from, pos_to = pos1, pos2
-            elif piece2 and not piece1:
-                pos_from, pos_to = pos2, pos1
-            elif piece1 and piece2:
-                # Both have pieces - it's a capture. 
-                # Origin is the piece of current turn
-                if piece1.color == game.board.turn:
-                    pos_from, pos_to = pos1, pos2
+            # For each changed square, toggle its occupancy
+            # Changed from occupied → now empty, or empty → now occupied
+            for pos in move_squares:
+                if pos in vision_occupied:
+                    vision_occupied.remove(pos)  # Was occupied, now empty
                 else:
-                    pos_from, pos_to = pos2, pos1
-            else:
-                pos_from, pos_to = None, None
+                    vision_occupied.add(pos)     # Was empty, now occupied
             
-            if pos_from and pos_to:
-                f_from, r_from = pos_from
-                f_to, r_to = pos_to
-                move_uci = f"{chr(97+f_from)}{r_from+1}{chr(97+f_to)}{r_to+1}"
+            # Use GameState to resolve the move
+            move, status = game.process_occupancy_change(vision_occupied)
+            
+            if move:
+                print(f">>> MOVIMENTO: {move.uci()} ({status})")
                 
-                try:
-                    move = chess.Move.from_uci(move_uci)
-                    if move in game.board.legal_moves:
-                        game.board.push(move)
-                        print(f">>> MOVIMENTO: {move_uci}")
-                        
-                        if game.board.is_check():
-                            print("    XEQUE!")
-                        if game.board.is_game_over():
-                            print(f"    FIM DE JOGO: {game.board.result()}")
-                    else:
-                        # Try reverse direction
-                        move_uci_rev = f"{chr(97+f_to)}{r_to+1}{chr(97+f_from)}{r_from+1}"
-                        move_rev = chess.Move.from_uci(move_uci_rev)
-                        if move_rev in game.board.legal_moves:
-                            game.board.push(move_rev)
-                            print(f">>> MOVIMENTO: {move_uci_rev}")
+                if game.board.is_check():
+                    print("    XEQUE!")
+                if game.board.is_game_over():
+                    print(f"    FIM DE JOGO: {game.board.result()}")
+            else:
+                # Fallback: try simple 2-square detection for edge cases
+                if len(move_squares) == 2:
+                    sq_list = list(move_squares)
+                    pos1, pos2 = sq_list[0], sq_list[1]
+                    f1, r1 = pos1
+                    f2, r2 = pos2
+                    sq1 = chess.square(f1, r1)
+                    sq2 = chess.square(f2, r2)
+                    
+                    piece1 = game.board.piece_at(sq1)
+                    piece2 = game.board.piece_at(sq2)
+                    
+                    if piece1 and not piece2:
+                        pos_from, pos_to = pos1, pos2
+                    elif piece2 and not piece1:
+                        pos_from, pos_to = pos2, pos1
+                    elif piece1 and piece2:
+                        if piece1.color == game.board.turn:
+                            pos_from, pos_to = pos1, pos2
                         else:
-                            print(f"[!] Movimento ilegal: {move_uci}")
-                except Exception as e:
-                    print(f"[!] Erro: {e}")
+                            pos_from, pos_to = pos2, pos1
+                    else:
+                        pos_from, pos_to = None, None
+                    
+                    if pos_from and pos_to:
+                        f_from, r_from = pos_from
+                        f_to, r_to = pos_to
+                        move_uci = f"{chr(97+f_from)}{r_from+1}{chr(97+f_to)}{r_to+1}"
+                        
+                        try:
+                            move = chess.Move.from_uci(move_uci)
+                            if move in game.board.legal_moves:
+                                game.board.push(move)
+                                print(f">>> MOVIMENTO: {move_uci}")
+                            else:
+                                move_uci_rev = f"{chr(97+f_to)}{r_to+1}{chr(97+f_from)}{r_from+1}"
+                                move_rev = chess.Move.from_uci(move_uci_rev)
+                                if move_rev in game.board.legal_moves:
+                                    game.board.push(move_rev)
+                                    print(f">>> MOVIMENTO: {move_uci_rev}")
+                                else:
+                                    print(f"[!] Movimento ilegal: {move_uci}")
+                        except Exception as e:
+                            print(f"[!] Erro: {e}")
+                else:
+                    print(f"[!] {status}: {len(move_squares)} casas mudaram")
             
-            # Always update reference after processing
+            # Update reference and reset
             detector.update_all_references(squares)
-            
-            # Reset
-            move_pending = False
-            changed_squares = set()
-            stable_count = 0
+            noise.reset()
         
         # Status display
-        status = "AGUARDANDO"
-        if move_pending:
-            status = f"DETECTANDO... ({len(changed_squares)} mudanças)"
+        state_name = noise.get_state_name()
+        progress = noise_data.get("progress", 0)
+        
+        if noise_state == NoiseState.IDLE:
+            status = "AGUARDANDO"
+            status_color = (0, 255, 0)
+        elif noise_state == NoiseState.NOISE_ACTIVE:
+            status = "MAO DETECTADA"
+            status_color = (0, 0, 255)
+        else:
+            status = f"DETECTANDO... {int(progress*100)}%"
+            status_color = (0, 255, 255)
         
         cv2.putText(vis, status, (10, 30),
-                   cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
+                   cv2.FONT_HERSHEY_SIMPLEX, 0.7, status_color, 2)
         cv2.putText(vis, f"Turno: {'Brancas' if game.board.turn else 'Pretas'}", (10, 60),
                    cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1)
-        cv2.putText(vis, f"FPS: {fps_display:.1f}", (board_size - 100, 30),
+        cv2.putText(vis, f"FPS: {fps_display:.1f} | {state_name}", (board_size - 180, 30),
                    cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 255), 2)
         
         # Show
