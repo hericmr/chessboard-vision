@@ -247,6 +247,7 @@ def main():
     print("Pressione 'q' para sair\n")
     
     # Main loop
+    frame_count = 0
     while not game.stop_event.is_set():
         success, img = cap.read()
         if not success:
@@ -264,8 +265,63 @@ def main():
         changes = game.detector.detect_changes(squares)
         current_changes = set(changes.keys())
         
-        # Detect pieces (NEW - circular detection)
-        piece_detections = game.piece_detector.detect_all_pieces(squares)
+        # --- SMART SCAN LOGIC ---
+        # Priorizar casas relevantes para o jogo
+        squares_to_check = None # Default: scan completo
+        frame_count += 1
+        
+        # A cada 30 frames (1s), scan completo de segurança
+        if frame_count % 30 != 0 and game.game.board:
+             squares_to_check = set()
+             
+             # 1. Casas ocupadas atualmente (origens potenciais)
+             # Precisamos saber se a peça ainda está lá
+             ocupadas = game.game.get_board_occupancy()
+             squares_to_check.update(ocupadas)
+             
+             # 2. Casas de destino de movimentos legais
+             # (Para detectar chegadas)
+             for move in game.game.board.legal_moves:
+                 # Converter square index (0-63) para (file, rank)
+                 to_sq = move.to_square
+                 
+                 # python-chess: file 0=a, rank 0=1
+                 # Nossa grid: file 0=a, rank 0=8 (topo da imagem)
+                 # Precisamos alinhar coordenadas.
+                 # O game_state deve lidar com isso, mas aqui precisamos passar (file, rank)
+                 # de acordo com o que o PieceDetector espera.
+                 
+                 f = chess.square_file(to_sq)
+                 r = chess.square_rank(to_sq)
+                 
+                 # Ajuste de rank: chess(0)=rank 1. visual(0)=rank 8 (topo).
+                 # Se a imagem não for flipada, rank visual 0 é rank 8 do xadrez.
+                 # Se for flipada (pretas), rank visual 0 é rank 1.
+                 
+                 # Melhor abordagem: Adicionar TODAS as casas se tiver dúvida,
+                 # ou confiar no mapeamento do game_state.
+                 # Por segurança, vamos mapear corretamente:
+                 
+                 visual_file = f
+                 visual_rank = 7 - r # Padrão (Brancas embaixo -> a1 é (0,7))
+                 
+                 # Se estiver jogando de pretas (tabuleiro girado), a lógica inverte?
+                 # O PieceDetector indexa por posição no grid da imagem.
+                 # Com imagem rotacionada 180, a casa (0,0) visual (topo-esq) passa a ser h1 (7,0)?
+                 # Não, se rotacionou a imagem, o topo-esquerda visual é a casa h1 (se pretas embaixo).
+                 
+                 # SIMPLIFICAÇÃO: Usar game_state para converter sq -> (file, rank)
+                 # Mas ele usa coordenadas lógicas.
+                 
+                 # Vamos assumir conversão padrão: 7-r para rank.
+                 squares_to_check.add((visual_file, visual_rank))
+        
+        # Detect detect pieces (com Smart Scan)
+        piece_detections = game.piece_detector.detect_all_pieces(
+            squares, 
+            use_delta=True, 
+            squares_to_check=squares_to_check
+        )
         vision_occupied = {pos for pos, info in piece_detections.items() if info['has_piece']}
         
         # Process through noise handler

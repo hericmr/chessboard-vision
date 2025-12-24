@@ -35,6 +35,40 @@ class PieceDetector:
         self.history_size = 5         # Guardar últimos N frames
         self.min_presence = 0.6       # 60% presença para confirmar peça
         self.detection_history = {}   # {(file, rank): [bool, bool, ...]}
+        
+        # DELTA DETECTION - referência para detectar mudanças
+        self.reference_squares = {}   # {(file, rank): grayscale_img}
+        self.cached_results = {}      # {(file, rank): detection_result}
+        self.change_threshold = 25    # Diferença média de pixels para considerar mudança
+    
+    def calibrate_reference(self, squares_dict):
+        """Salva referência das imagens para detecção delta."""
+        self.reference_squares.clear()
+        self.cached_results.clear()
+        
+        for pos, img in squares_dict.items():
+            gray = self._preprocess_square(img)
+            self.reference_squares[pos] = gray.copy()
+            # Detectar estado inicial
+            result = self.detect_piece(img, pos)
+            self.cached_results[pos] = result
+    
+    def _has_changed(self, pos, current_gray):
+        """Verifica se a casa mudou em relação à referência."""
+        if pos not in self.reference_squares:
+            return True  # Sem referência = processar
+        
+        ref = self.reference_squares[pos]
+        
+        # Calcular diferença média de intensidade
+        diff = cv2.absdiff(current_gray, ref)
+        mean_diff = np.mean(diff)
+        
+        return mean_diff > self.change_threshold
+    
+    def _update_reference(self, pos, gray):
+        """Atualiza referência de uma casa."""
+        self.reference_squares[pos] = gray.copy()
     
     def _update_history(self, pos, has_piece):
         """Atualiza histórico de detecção para uma casa."""
@@ -264,6 +298,12 @@ class PieceDetector:
             'axes': None,
         }
         
+        # Pré-filtro: se a imagem for muito uniforme, não tem peça
+        # (filtra casa vazia lisa ou mão cobrindo tudo)
+        std_dev = np.std(gray)
+        if std_dev < 15:  # Threshold de uniformidade
+            return result
+        
         # Método 1: Hough Circles (círculos perfeitos)
         found_hough, center, radius = self._detect_circle_hough(gray)
         
@@ -293,12 +333,12 @@ class PieceDetector:
         result['center_border_diff'] = diff
         
         # Se diferença significativa entre centro e borda
-        if diff > 25:  # Threshold mais baixo
+        if diff > 40:  # Threshold aumentado (era 25) para evitar falso positivo com sombra
             result['has_piece'] = True
             result['center'] = (w // 2, h // 2)
             result['radius'] = min(h, w) // 3
             result['method'] = 'center_diff'
-            result['confidence'] = min(1.0, diff / 50)
+            result['confidence'] = min(1.0, diff / 80)
             return result
         
         # Método 5: Simetria radial
@@ -314,44 +354,97 @@ class PieceDetector:
         
         return result
     
-    def detect_all_pieces(self, squares_dict, use_smoothing=True):
+    
+    def detect_all_pieces(self, squares_dict, use_smoothing=True, use_delta=True, squares_to_check=None):
         """
         Detecta peças em todas as casas.
         
         Args:
             squares_dict: {(file, rank): square_img}
             use_smoothing: usar suavização temporal
+            use_delta: só processar casas que mudaram (performance)
+            squares_to_check: set of (file, rank) - se fornecido, força verificação nestas casas
             
         Returns:
             dict: {(file, rank): detection_result}
         """
         results = {}
+        processed_count = 0
         
         for pos, img in squares_dict.items():
-            raw_result = self.detect_piece(img, pos)
+            gray = self._preprocess_square(img)
             
-            # Atualizar histórico
-            self._update_history(pos, raw_result['has_piece'])
+            # Decidir se deve processar esta casa
+            should_process = False
             
+            # 1. Prioridade: Se está na lista de verificação obrigatória (regras)
+            if squares_to_check is not None:
+                if pos in squares_to_check:
+                    should_process = True
+            
+            # 2. Se não foi forçado, verificar delta (visual)
+            # Se squares_to_check for None, processa tudo (respeitando delta)
+            if not should_process:
+                if squares_to_check is None or use_delta: # Se delta ativo, verifica mudança
+                    if pos not in self.cached_results or self._has_changed(pos, gray):
+                        should_process = True
+            
+            # Se a imagem mudou, processar novamente
+            if should_process:
+                processed_count += 1
+                raw_result = self.detect_piece(img, pos)
+                
+                # Armazenar resultado BRUTO no cache (antes da estabilização)
+                self.cached_results[pos] = raw_result.copy()
+                # NOTA: _update_reference movido para o final (só se estável)
+                
+                raw_has_piece = raw_result['has_piece']
+            else:
+                # Usar resultado bruto do cache
+                if pos in self.cached_results:
+                     raw_result = self.cached_results[pos].copy()
+                else:
+                     # Fallback seguro se não tiver cache
+                     raw_result = self.detect_piece(img, pos)
+                     self.cached_results[pos] = raw_result.copy()
+                
+                raw_has_piece = raw_result['has_piece']
+            
+            # SEMPRE atualizar histórico (mesmo se veio do cache)
+            self._update_history(pos, raw_has_piece)
+            
+            # Verificar estabilidade
+            is_stable_update = True
             if use_smoothing:
-                # Usar detecção estável
+                # Recalcular estabilidade com histórico atualizado
                 stable_detection = self._get_stable_detection(pos)
                 raw_result['has_piece'] = stable_detection
+                
+                # Adicionar info de debug
+                if 'confidence' in raw_result:
+                    raw_result['confidence'] = raw_result['confidence']
+                
+                # Se o que vemos agora (raw) difere do estável, a situação é instável (transição)
+                # Não devemos atualizar a referência visual nesses casos
+                if raw_has_piece != stable_detection:
+                    is_stable_update = False
+            
+            # Atualizar referência visual APENAS se:
+            # 1. Processamos uma imagem nova (should_process)
+            # 2. A detecção é estável (raw == stable)
+            # Isso evita salvar referência de uma "mão" passando
+            if should_process and is_stable_update:
+                self._update_reference(pos, gray)
             
             results[pos] = raw_result
+        
+        # Debug: mostrar quantas casas foram processadas
+        # if processed_count > 0:
+        #    print(f"[Delta] Processadas: {processed_count}/64")
         
         return results
     
     def get_occupied_squares(self, squares_dict, use_smoothing=True):
-        """
-        Retorna conjunto de casas ocupadas.
-        
-        Args:
-            squares_dict: {(file, rank): square_img}
-            use_smoothing: usar suavização temporal
-            
-        Returns:
-            set of (file, rank)
-        """
+        # Retorna conjunto de casas ocupadas.
         results = self.detect_all_pieces(squares_dict, use_smoothing)
         return {pos for pos, info in results.items() if info['has_piece']}

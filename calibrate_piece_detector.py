@@ -40,9 +40,8 @@ class DetectorCalibrator:
             'hough_param2': 30,    # Acumulador threshold
             'small_min': 12,       # Tower top min radius %
             'small_max': 25,       # Tower top max radius %
-            'knight_aspect_min': 120,  # Aspecto mínimo * 100
             'knight_aspect_max': 250,  # Aspecto máximo * 100
-            'center_diff_thresh': 25,  # Threshold centro vs borda
+            'center_diff_thresh': 40,  # Threshold centro vs borda (aumentado para evitar sombras)
         }
         
         self.load_settings()
@@ -122,7 +121,10 @@ def main():
     
     print("\n=== CALIBRADOR DE DETECÇÃO ===")
     print("Ajuste os sliders para calibrar")
-    print("'s' = Salvar | 'r' = Reset | 'q' = Sair\n")
+    print("'s'=Save 'r'=Reset 'h'=Hist 'd'=Delta 'q'=Quit\n")
+    
+    use_smoothing = True
+    use_delta = False
     
     while True:
         success, img = cap.read()
@@ -136,8 +138,8 @@ def main():
         squares = grid.split_board(warped)
         sq_size = board_size // 8
         
-        # Detectar peças
-        results = calibrator.detector.detect_all_pieces(squares)
+        # Detectar peças (toggle delta e smooth)
+        results = calibrator.detector.detect_all_pieces(squares, use_delta=use_delta, use_smoothing=use_smoothing)
         
         # Visualização
         vis = warped.copy()
@@ -161,7 +163,7 @@ def main():
                 piece_count += 1
                 radius = info.get('radius') or (sq_size // 3)
                 method = info.get('method', '?')
-                conf = info['confidence']
+                conf = info.get('confidence', 0.0)
                 
                 # Contar método
                 method_counts[method] = method_counts.get(method, 0) + 1
@@ -189,7 +191,9 @@ def main():
         panel[:] = (30, 30, 30)
         
         # Status
-        cv2.putText(panel, f"Pecas: {piece_count}/32", (10, 25),
+        mode_str = "SMOOTH" if use_smoothing else "RAW"
+        delta_str = "DELTA ON" if use_delta else "DELTA OFF"
+        cv2.putText(panel, f"Pecas: {piece_count}/32 [{mode_str}] [{delta_str}]", (10, 25),
                    cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 255), 2)
         
         # Métodos usados
@@ -216,7 +220,7 @@ def main():
                    (300, 75), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (200, 200, 200), 1)
         
         # Teclas
-        cv2.putText(panel, "'s'=Salvar  'r'=Reset  'q'=Sair", (10, 105),
+        cv2.putText(panel, "'s'=Save 'r'=Reset 'h'=Hist 'd'=Delta 'q'=Quit", (10, 105),
                    cv2.FONT_HERSHEY_SIMPLEX, 0.5, (150, 150, 150), 1)
         
         # Combinar
@@ -227,6 +231,12 @@ def main():
         key = cv2.waitKey(1) & 0xFF
         if key == ord('q'):
             break
+        elif key == ord('d'):
+            use_delta = not use_delta
+            print(f"[Toggle] Delta: {use_delta}")
+        elif key == ord('h'):
+            use_smoothing = not use_smoothing
+            print(f"[Toggle] Smoothing: {use_smoothing}")
         elif key == ord('s'):
             calibrator.save_settings()
         elif key == ord('r'):
@@ -239,7 +249,7 @@ def main():
                 'small_max': 25,
                 'knight_aspect_min': 120,
                 'knight_aspect_max': 250,
-                'center_diff_thresh': 25,
+                'center_diff_thresh': 40,
             }
             calibrator.apply_params()
             print("[Reset] Parâmetros resetados")
