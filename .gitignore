@@ -3,3 +3,8 @@ __pycache__/
 *.pyc
 .envBackground-subtraction/
 .env
+*.so
+*.c
+*.cpp
+build/
+

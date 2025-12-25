@@ -311,7 +311,7 @@ class GameSession:
             overlay = vis.copy()
             overlay[:] = (0, 0, 80)
             cv2.addWeighted(overlay, 0.3, vis, 0.7, 0, vis)
-            cv2.putText(vis, "MAO DETECTADA", (board_size//2 - 120, board_size//2),
+            cv2.putText(vis, "jogada em andamento", (board_size//2 - 120, board_size//2),
                        cv2.FONT_HERSHEY_SIMPLEX, 1.0, (0, 0, 255), 3)
 
         # Lifted Piece & Radar

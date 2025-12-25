@@ -4,3 +4,4 @@ cvzone
 mediapipe
 mediapipe
 python-chess
+Cython

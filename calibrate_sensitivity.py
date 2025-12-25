@@ -297,7 +297,7 @@ def main():
         
         # Pattern-based status
         if pattern.get('is_hand'):
-            status_text = "MAO DETECTADA"
+            status_text = "JOGADA em ANDAMENTO..."
             status_color = (0, 0, 255)
         elif pattern.get('is_move'):
             status_text = "MOVIMENTO VALIDO!"

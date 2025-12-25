@@ -3,51 +3,35 @@ import numpy as np
 import time
 import json
 import os
-import sys
+cimport numpy as np
 
-# --- CYTHON CONFIG ---
-USE_CYTHON = True
-# ---------------------
-
-ImageEnhancerCython = None
-if USE_CYTHON:
-    try:
-        # Adicionar diretório raiz ao path se necessário
-        sys.path.append(os.getcwd())
-        from src.cython.frame_enhancer_cython import ImageEnhancerCython
-        print("[INFO] FrameEnhancer: Modo Cython ATIVADO")
-    except ImportError as e:
-        print(f"[WARN] FrameEnhancer: Falha ao carregar Cython ({e}). Usando Python.")
-        USE_CYTHON = False
-
-class ImageEnhancerPython:
+class ImageEnhancerCython:
     """
+    Cython version of ImageEnhancer.
     A modular pipeline to improve visual quality of webcam frames.
     Implements lighting correction, noise reduction, sharpening, and normalization.
     """
-    def __init__(self, clahe_clip_limit=3.0, tile_grid_size=(8, 8)):
+    def __init__(self, float clahe_clip_limit=3.0, tuple tile_grid_size=(8, 8)):
         """
         Initialize the enhancer with configurable parameters.
         :param clahe_clip_limit: Threshold for contrast limiting in CLAHE.
         :param tile_grid_size: Size of grid for histogram equalization.
         """
         # CLAHE (Contrast Limited Adaptive Histogram Equalization) setup
-        # Best for local contrast enhancement without amplifying noise too much
         self.clahe = cv2.createCLAHE(clipLimit=clahe_clip_limit, tileGridSize=tile_grid_size)
         
         # Sharpening kernel
-        # Highlights edges by subtracting neighboring pixels from the center
         self.sharpen_kernel = np.array([[-1, -1, -1],
                                         [-1,  9, -1],
-                                        [-1, -1, -1]])
+                                        [-1, -1, -1]], dtype=np.float32)
         
         self.profile = self.load_profile()
 
     def load_profile(self):
         try:
             if os.path.exists("color_profile.json"):
+                print("Loaded color profile (Cython)")
                 with open("color_profile.json", "r") as f:
-                    print("Loaded color profile")
                     return json.load(f)
         except Exception as e:
             print(f"Error loading profile: {e}")
@@ -58,14 +42,14 @@ class ImageEnhancerPython:
             return frame
             
         # Extract parameters with defaults
-        hue_shift = self.profile.get("hue_shift", 0)
-        sat_scale = self.profile.get("sat_scale", 1.0)
-        val_scale = self.profile.get("val_scale", 1.0)
-        contrast = self.profile.get("contrast", 1.0)
-        brightness = self.profile.get("brightness", 0)
-        radical_mode = self.profile.get("radical_mode", 0)
-        target_hue = self.profile.get("target_hue", 0)
-        hue_window = self.profile.get("hue_window", 20)
+        cdef float hue_shift = self.profile.get("hue_shift", 0.0)
+        cdef float sat_scale = self.profile.get("sat_scale", 1.0)
+        cdef float val_scale = self.profile.get("val_scale", 1.0)
+        cdef float contrast = self.profile.get("contrast", 1.0)
+        cdef int brightness = self.profile.get("brightness", 0)
+        cdef int radical_mode = self.profile.get("radical_mode", 0)
+        cdef float target_hue = self.profile.get("target_hue", 0.0)
+        cdef float hue_window = self.profile.get("hue_window", 20.0)
 
         # 1. Contrast/Brightness
         frame = cv2.convertScaleAbs(frame, alpha=contrast, beta=brightness)
@@ -80,6 +64,7 @@ class ImageEnhancerPython:
             mask = h_dist < hue_window
             
             # Boost target saturation, desaturate others
+            # Using numpy operations which are optimized in C if types are clear
             s[mask] = s[mask] * 2.0 
             s[~mask] = s[~mask] * 0.5
             
@@ -102,7 +87,6 @@ class ImageEnhancerPython:
         """
         1. Lighting Correction
         Converts to LAB color space and applies CLAHE to the L (Lightness) channel.
-        This handles shadows and uneven lighting better than global equalization.
         """
         # Convert BGR to LAB
         lab = cv2.cvtColor(frame, cv2.COLOR_BGR2LAB)
@@ -122,39 +106,28 @@ class ImageEnhancerPython:
     def reduce_noise(self, frame):
         """
         2. Noise Reduction
-        Uses Bilateral Filter to smooth textures while preserving edges.
-        More expensive than Gaussian, but critical for keeping shapes sharp.
+        Uses Bilateral Filter.
         """
-        # d=9: Diameter of each pixel neighborhood
-        # sigmaColor=75: Filter sigma in the color space (larger = more smoothing)
-        # sigmaSpace=75: Filter sigma in the coordinate space (larger = further pixels mix)
         return cv2.bilateralFilter(frame, d=9, sigmaColor=75, sigmaSpace=75)
 
     def sharpen(self, frame):
         """
         3. Sharpening
-        Applies a convolution kernel to enhance edges.
         """
         return cv2.filter2D(frame, -1, self.sharpen_kernel)
 
     def normalize_intensity(self, frame):
         """
         4. Normalization
-        Normalizes pixel intensity to the full 0-255 range.
-        Ensures the image isn't washed out or too dark.
         """
         return cv2.normalize(frame, None, alpha=0, beta=255, norm_type=cv2.NORM_MINMAX)
 
     def prepare_analysis(self, frame):
         """
         5. Preparation for Analysis
-        Returns a grayscale version and a binary thresholded version (Otsu).
-        Useful for segmentation or classification tasks.
         """
         gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
-        # Gaussian blur before thresholding helps reduce noise spots
         gray_blurred = cv2.GaussianBlur(gray, (5, 5), 0)
-        # Otsu's thresholding automatically finds the optimal threshold value
         _, binary = cv2.threshold(gray_blurred, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
         return gray, binary
 
@@ -162,14 +135,13 @@ class ImageEnhancerPython:
         """
         Executes the full pipeline sequentially.
         """
-        # Step 0: Color Profile (Custom calibration)
-        # Apply BEFORE lighting correction to ensure we're working on the intended colors
+        # Step 0: Color Profile
         frame = self.apply_color_profile(frame)
 
         # Step 1: Lighting
         enhanced = self.correct_lighting(frame)
         
-        # Step 2: Noise (applied after lighting to avoid amplifying noise first)
+        # Step 2: Noise
         enhanced = self.reduce_noise(enhanced)
         
         # Step 3: Sharpening
@@ -179,60 +151,3 @@ class ImageEnhancerPython:
         enhanced = self.normalize_intensity(enhanced)
         
         return enhanced
-
-
-# --- SELETOR DE IMPLEMENTAÇÃO ---
-if USE_CYTHON and ImageEnhancerCython:
-    ImageEnhancer = ImageEnhancerCython
-else:
-    ImageEnhancer = ImageEnhancerPython
-    print("[INFO] Usando implementação PYTHON Pura")
-# --------------------------------
-
-def main():
-    # Initialize webcam
-    cap = cv2.VideoCapture(0)
-    
-    if not cap.isOpened():
-        print("Error: Could not open webcam.")
-        return
-
-    enhancer = ImageEnhancer()
-    
-    print("Starting Frame Enhancer... Press 'q' to quit.")
-    
-    prev_time = 0
-
-    while True:
-        ret, frame = cap.read()
-        if not ret:
-            print("Failed to grab frame.")
-            break
-
-        # Calculate FPS
-        curr_time = time.time()
-        fps = 1 / (curr_time - prev_time) if prev_time != 0 else 0
-        prev_time = curr_time
-
-        # --- PIPELINE ---
-        enhanced_frame = enhancer.process_pipeline(frame)
-        gray, binary = enhancer.prepare_analysis(enhanced_frame)
-        # ----------------
-
-        # Display FPS on frame
-        cv2.putText(frame, f"FPS: {int(fps)}", (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 255, 0), 2)
-        
-        # stack images for display (optional, resize to fit screen if needed)
-        # Just showing separate windows for clarity
-        cv2.imshow('Original Feed', frame)
-        cv2.imshow('Enhanced Feed', enhanced_frame)
-        cv2.imshow('Analysis (Otsu Binary)', binary)
-
-        if cv2.waitKey(1) & 0xFF == ord('q'):
-            break
-
-    cap.release()
-    cv2.destroyAllWindows()
-
-if __name__ == "__main__":
-    main()

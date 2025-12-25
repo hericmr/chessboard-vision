@@ -1,27 +1,12 @@
 import cv2
 import numpy as np
+cimport numpy as np
 from piece_detector import PieceDetector
-import sys
-import os
 
-# --- CYTHON CONFIG ---
-USE_CYTHON = True
-# ---------------------
-
-ChangeDetectorCython = None
-if USE_CYTHON:
-    try:
-        sys.path.append(os.getcwd())
-        from src.cython.change_detector_cython import ChangeDetectorCython
-        print("[INFO] ChangeDetector: Modo Cython ATIVADO")
-    except ImportError as e:
-        print(f"[WARN] ChangeDetector: Falha ao carregar Cython ({e}). Usando Python.")
-        USE_CYTHON = False
-
-class ChangeDetectorPython:
+class ChangeDetectorCython:
     def __init__(self):
         self.z_threshold = 2.5
-        self.initial_variance = 100
+        self.initial_variance = 100.0
         self.alpha = 0.1
         self.blur_kernel = 5
         self._kernel = 5
@@ -37,7 +22,6 @@ class ChangeDetectorPython:
         """Initialize background model (Mean/Variance) from current frame."""
         self.means = {}
         self.variances = {}
-        is_float = True
         
         for pos, img in squares.items():
             gray = self._preprocess(img)
@@ -70,20 +54,28 @@ class ChangeDetectorPython:
             self.calibrate(squares)
             return
 
+        cdef float alpha = self.alpha
+        cdef float one_minus_alpha = 1.0 - alpha
+
+        # We iterate over items. Optimizing this loop is the main goal.
+        # Since we use numpy array operations inside, it's already fast, but let's encourage C types where possible.
+        
         for pos, img in squares.items():
             if self.focus_squares and pos not in self.focus_squares:
                 continue
 
+            # Ensure we get float32 arrays
             gray = self._preprocess(img).astype(np.float32)
             mean = self.means[pos]
             var = self.variances[pos]
             
             # Update Mean: (1-alpha)*prev + alpha*curr
-            new_mean = (1 - self.alpha) * mean + self.alpha * gray
+            # Using numpy arithmetic is safe and fast enough for this step usually
+            new_mean = one_minus_alpha * mean + alpha * gray
             
             # Update Variance: (1-alpha)*prev + alpha*(diff^2)
             diff = gray - new_mean
-            new_var = (1 - self.alpha) * var + self.alpha * (diff ** 2)
+            new_var = one_minus_alpha * var + alpha * (diff ** 2)
             
             # Constraint variance to avoid 0
             new_var = np.maximum(new_var, 10.0)
@@ -113,6 +105,8 @@ class ChangeDetectorPython:
 
         # Determine which squares to check
         to_check = self.focus_squares if self.focus_squares else squares.keys()
+        
+        cdef float z_thresh = self.z_threshold
 
         for pos in to_check:
             if pos not in squares: continue
@@ -130,13 +124,16 @@ class ChangeDetectorPython:
             # Change if Z > Threshold
             std_dev = np.sqrt(var)
             diff = np.abs(gray - mean)
+            # Avoid division by zero if var is somehow 0 (guarded by max(10) earlier but safe to be sure)
             z_score_map = diff / std_dev
             
             # Mask of changed pixels
-            changed_mask = z_score_map > self.z_threshold
+            changed_mask = z_score_map > z_thresh
             changed_pixels = np.count_nonzero(changed_mask)
             total_pixels = gray.size
-            pct_changed = (changed_pixels / total_pixels) * 100
+            if total_pixels == 0: continue
+            
+            pct_changed = (float(changed_pixels) / total_pixels) * 100.0
             
             if pct_changed < 5.0: # Ignore negligible noise
                 continue
@@ -150,9 +147,6 @@ class ChangeDetectorPython:
                 intensity = 'LEVE' # Light changes (shadows)
             
             # 3. Circularity Check (for Parcial/Moved pieces)
-            # Use PieceDetector on the CURRENT image to see if there's a piece
-            # OR check if the *difference* looks like a piece?
-            # Usually we check if the current view looks like a piece.
             pd_result = self.piece_detector.detect_piece(img, pos)
             is_circular = pd_result['has_piece']
             
@@ -173,7 +167,7 @@ class ChangeDetectorPython:
         """
         total_squares = len(detailed)
         total_intensity = sum(1 for v in detailed.values() if v['intensity'] == 'TOTAL')
-        parcial_squares = [pos for pos, v in detailed.items() if v['intensity'] == 'PARCIAL']
+        # parcial_squares = [pos for pos, v in detailed.items() if v['intensity'] == 'PARCIAL']
         
         # Heuristic 1: If too many squares blocked TOTAL -> Hand
         if total_intensity >= 2 or total_squares >= 4:
@@ -185,26 +179,10 @@ class ChangeDetectorPython:
              return {'is_hand': True, 'is_move': False, 'move_candidates': set()}
              
         # Heuristic 3: Move Candidate
-        # Typically 2 squares change for a move (From->To)
-        # Or 1 square if lifted (From)
         move_candidates = set(detailed.keys())
-        
-        # Refine: If a square changed 'TOTAL' it's likely the hand covering it
-        # If 'PARCIAL' and 'is_circular', it's likely the piece landing or lifting?
-        # Actually, when lifting, detecting 'is_circular' might fail if empty?
-        # When landing, 'is_circular' should be true.
         
         return {
             'is_hand': False, 
             'is_move': (len(move_candidates) == 2), 
             'move_candidates': move_candidates
         }
-
-# --- SELETOR DE IMPLEMENTAÇÃO ---
-if USE_CYTHON and ChangeDetectorCython:
-    ChangeDetector = ChangeDetectorCython
-else:
-    ChangeDetector = ChangeDetectorPython
-    print("[INFO] Usando implementação PYTHON Pura (ChangeDetector)")
-# --------------------------------
-
