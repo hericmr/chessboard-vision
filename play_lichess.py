@@ -372,9 +372,17 @@ def main():
         vis = warped.copy()
         
         # Grid lines
-        for i in range(9):
-            cv2.line(vis, (i * sq_size, 0), (i * sq_size, board_size), (50, 50, 50), 1)
-            cv2.line(vis, (0, i * sq_size), (board_size, i * sq_size), (50, 50, 50), 1)
+        if grid.grid_lines_x and grid.grid_lines_y:
+             # Draw Smart Grid (Greenish)
+             for x in grid.grid_lines_x:
+                 cv2.line(vis, (int(x), 0), (int(x), board_size), (0, 200, 100), 1)
+             for y in grid.grid_lines_y:
+                 cv2.line(vis, (0, int(y)), (board_size, int(y)), (0, 200, 100), 1)
+        else:
+             # Draw Linear Grid (Gray)
+             for i in range(9):
+                 cv2.line(vis, (i * sq_size, 0), (i * sq_size, board_size), (50, 50, 50), 1)
+                 cv2.line(vis, (0, i * sq_size), (board_size, i * sq_size), (50, 50, 50), 1)
         
         # NÃO desenhar círculos frame-a-frame (instável)
         # A visualização é feita pelas peças do tabuleiro lógico abaixo
