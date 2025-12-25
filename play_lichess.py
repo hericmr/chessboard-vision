@@ -13,7 +13,7 @@ import threading
 from queue import Queue
 
 import board_detection
-from grid_extractor import GridExtractor
+from grid_extractor import SmartGridExtractor
 from calibration_module import CalibrationModule
 from game_state import GameState
 from noise_handler import NoiseHandler, NoiseState
@@ -48,9 +48,9 @@ class LichessGame:
         # Estabilização temporal
         self.stable_occupancy = None
         self.stable_count = 0
-        self.STABILITY_REQUIRED = 4   # Frames necessários para confirmar (era 15)
+        self.STABILITY_REQUIRED = 20   # Aumentado para 20 frames (~1.5s) para tolerar trocas de peças
         self.last_move_time = 0
-        self.MOVE_COOLDOWN = 1.0      # Segundos entre movimentos (era 1.5)
+        self.MOVE_COOLDOWN = 2.0      # Aumentado para 2.0s para dar tempo da mão sair
         
     def connect_lichess(self) -> bool:
         """Connect to Lichess."""
@@ -86,14 +86,25 @@ class LichessGame:
         return self._create_new_game()
     
     def _create_new_game(self) -> str:
-        """Create a new game by seeking."""
-        print("\n=== NOVO JOGO ===")
-        print("Buscando oponente... (Ctrl+C para cancelar)")
+        print("\n=== AGUARDANDO JOGO ===")
+        print("Crie um jogo no Lichess (Navegador ou App)")
+        print("Procurando... (Ctrl+C para cancelar)")
         
-        # For now, return None - user should create game on Lichess website
-        print("\n[!] Crie um jogo no Lichess e reinicie.")
-        print("    Use 'Jogar com um amigo' → 'Criar jogo'")
-        return None
+        try:
+            while True:
+                time.sleep(2)
+                games = self.lichess.get_ongoing_games()
+                if games:
+                    # Auto-select the first game found
+                    g = games[0]
+                    game_id = g.get("gameId", g.get("id"))
+                    opponent = g.get("opponent", {}).get("username", "?")
+                    print(f"\n[!] Jogo Encontrado! vs {opponent}")
+                    return game_id
+                
+                print(".", end="", flush=True)
+        except KeyboardInterrupt:
+            return None
     
     def start_lichess_stream(self, game_id: str):
         """Start streaming game events in background thread."""
@@ -202,7 +213,14 @@ def main():
     points_ordered = board_detection.reorder(board_corners)
     
     # Initialize vision
-    grid = GridExtractor()
+    grid = SmartGridExtractor()
+    if "grid_lines_x" in config and config["grid_lines_x"]:
+        grid.grid_lines_x = config["grid_lines_x"]
+        grid.grid_lines_y = config["grid_lines_y"]
+        print("Smart Grid Carregado!")
+    else:
+        print("Usando Grade Linear (Padrao)")
+
     game = LichessGame()
     
     # Capture initial reference
@@ -421,7 +439,11 @@ def main():
         total_diff = len(diff_missing) + len(diff_extra)
         
         # Verificar estabilidade da ocupação
-        if game.stable_occupancy == vision_occupied:
+        # Se houver MUITAS mudanças (> 4), é provavel que seja a mão passando -> RESET
+        if total_diff > 4:
+            game.stable_count = 0
+            game.stable_occupancy = set() # Invalidar
+        elif game.stable_occupancy == vision_occupied:
             game.stable_count += 1
         else:
             game.stable_occupancy = vision_occupied.copy()
@@ -436,7 +458,7 @@ def main():
         
         detected_move = None
         
-        if game.stable_count >= game.STABILITY_REQUIRED and cooldown_ok and not game.waiting_for_opponent:
+        if game.stable_count >= game.STABILITY_REQUIRED and cooldown_ok and not game.waiting_for_opponent and noise_state != NoiseState.NOISE_ACTIVE:
             diff_missing_list = list(diff_missing)
             diff_extra_list = list(diff_extra)
             possible_moves = []

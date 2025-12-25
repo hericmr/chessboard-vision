@@ -1,1 +1,44 @@
-{"corners": [[518, 32], [1416, 94], [454, 957], [1341, 1027]], "player_color": "BLACK", "orientation_flipped": false}
+{
+    "corners": [
+        [
+            597,
+            201
+        ],
+        [
+            1311,
+            159
+        ],
+        [
+            1352,
+            813
+        ],
+        [
+            631,
+            844
+        ]
+    ],
+    "player_color": "white",
+    "orientation_flipped": false,
+    "grid_lines_x": [
+        0,
+        80,
+        158,
+        235,
+        311,
+        387,
+        464,
+        543,
+        620
+    ],
+    "grid_lines_y": [
+        0,
+        83,
+        161,
+        238,
+        314,
+        390,
+        467,
+        543,
+        620
+    ]
+}

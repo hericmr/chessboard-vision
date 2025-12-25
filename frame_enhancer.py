@@ -1,6 +1,10 @@
 import cv2
 import numpy as np
+import cv2
+import numpy as np
 import time
+import json
+import os
 
 class ImageEnhancer:
     """
@@ -22,6 +26,63 @@ class ImageEnhancer:
         self.sharpen_kernel = np.array([[-1, -1, -1],
                                         [-1,  9, -1],
                                         [-1, -1, -1]])
+        
+        self.profile = self.load_profile()
+
+    def load_profile(self):
+        try:
+            if os.path.exists("color_profile.json"):
+                with open("color_profile.json", "r") as f:
+                    print("Loaded color profile")
+                    return json.load(f)
+        except Exception as e:
+            print(f"Error loading profile: {e}")
+        return {}
+
+    def apply_color_profile(self, frame):
+        if not self.profile:
+            return frame
+            
+        # Extract parameters with defaults
+        hue_shift = self.profile.get("hue_shift", 0)
+        sat_scale = self.profile.get("sat_scale", 1.0)
+        val_scale = self.profile.get("val_scale", 1.0)
+        contrast = self.profile.get("contrast", 1.0)
+        brightness = self.profile.get("brightness", 0)
+        radical_mode = self.profile.get("radical_mode", 0)
+        target_hue = self.profile.get("target_hue", 0)
+        hue_window = self.profile.get("hue_window", 20)
+
+        # 1. Contrast/Brightness
+        frame = cv2.convertScaleAbs(frame, alpha=contrast, beta=brightness)
+        
+        # 2. HSV Adjustments
+        hsv = cv2.cvtColor(frame, cv2.COLOR_BGR2HSV).astype(np.float32)
+        h, s, v = cv2.split(hsv)
+        
+        if radical_mode:
+            h_dist = np.abs(h - target_hue)
+            h_dist = np.minimum(h_dist, 180 - h_dist)
+            mask = h_dist < hue_window
+            
+            # Boost target saturation, desaturate others
+            s[mask] = s[mask] * 2.0 
+            s[~mask] = s[~mask] * 0.5
+            
+        # Apply global adjustments
+        h = (h + hue_shift) % 180
+        s = s * sat_scale
+        v = v * val_scale
+        
+        # Clip values
+        h = np.clip(h, 0, 179)
+        s = np.clip(s, 0, 255)
+        v = np.clip(v, 0, 255)
+        
+        hsv_final = cv2.merge([h, s, v])
+        hsv_final = hsv_final.astype(np.uint8)
+        
+        return cv2.cvtColor(hsv_final, cv2.COLOR_HSV2BGR)
 
     def correct_lighting(self, frame):
         """
@@ -87,6 +148,10 @@ class ImageEnhancer:
         """
         Executes the full pipeline sequentially.
         """
+        # Step 0: Color Profile (Custom calibration)
+        # Apply BEFORE lighting correction to ensure we're working on the intended colors
+        frame = self.apply_color_profile(frame)
+
         # Step 1: Lighting
         enhanced = self.correct_lighting(frame)
         

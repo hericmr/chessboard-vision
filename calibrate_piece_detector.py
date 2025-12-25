@@ -19,7 +19,7 @@ import json
 import os
 
 import board_detection
-from grid_extractor import GridExtractor
+from grid_extractor import SmartGridExtractor
 from calibration_module import CalibrationModule
 from piece_detector import PieceDetector
 
@@ -58,11 +58,55 @@ class DetectorCalibrator:
             except:
                 pass
     
-    def save_settings(self):
-        """Salva parâmetros atuais."""
+    def save_settings(self, results=None, sq_size=None):
+        """Salva parâmetros atuais e gera relatório."""
+        # 1. Save JSON
         with open(SETTINGS_FILE, 'w') as f:
             json.dump(self.params, f, indent=2)
         print(f"[Salvo] {SETTINGS_FILE}")
+        
+        # 2. Export Stats
+        if results and sq_size:
+            self.export_stats(results, sq_size)
+
+    def export_stats(self, results, sq_size):
+        """Gera relatório de estatísticas das peças."""
+        filename = "piece_stats.txt"
+        area_square = sq_size ** 2
+        
+        with open(filename, 'w') as f:
+            f.write(f"=== ESTATISTICAS DE PECAS ({len(results)} casas analisadas) ===\n")
+            f.write(f"Square Size: {sq_size}px\n")
+            f.write(f"{'CASA':<6} {'STATUS':<10} {'METODO':<15} {'RAIO':<8} {'AREA%':<8} {'BG%':<8} {'CONF'}\n")
+            f.write("-" * 80 + "\n")
+            
+            count = 0
+            for (col, row), info in results.items():
+                if info['has_piece']:
+                    count += 1
+                    # Logica de coordenadas visual
+                    # (col, row) sao indices 0-7. 
+                    # Se pretas, a visualizacao ja rotacionou, mas aqui temos indices brutos do grid.
+                    # Vamos salvar como (File, Rank) visual mesmo.
+                    
+                    file_char = chr(ord('a') + col)
+                    rank_num = 8 - row
+                    coord = f"{file_char}{rank_num}" # Note: isso assume orientacao padrao na grid split
+                    
+                    radius = info.get('radius', 0)
+                    method = info.get('method', 'N/A')
+                    conf = info.get('confidence', 0.0)
+                    
+                    area_piece = np.pi * (radius ** 2)
+                    pct_area = (area_piece / area_square) * 100
+                    pct_bg = 100 - pct_area
+                    
+                    f.write(f"{coord:<6} {'PECA':<10} {method:<15} {radius:<8} {pct_area:<8.1f} {pct_bg:<8.1f} {conf:.2%}\n")
+            
+            f.write("-" * 80 + "\n")
+            f.write(f"Total de pecas detectadas: {count}\n")
+            
+        print(f"[Relatorio] Salvo em {filename}")
     
     def apply_params(self):
         """Aplica parâmetros ao detector."""
@@ -111,7 +155,17 @@ def main():
     board_corners = np.array(corners).reshape((4, 1, 2))
     points_ordered = board_detection.reorder(board_corners)
     
-    grid = GridExtractor()
+    points_ordered = board_detection.reorder(board_corners)
+    
+    # Init Smart Grid
+    grid = SmartGridExtractor()
+    if "grid_lines_x" in config and config["grid_lines_x"]:
+        grid.grid_lines_x = config["grid_lines_x"]
+        grid.grid_lines_y = config["grid_lines_y"]
+        print("Smart Grid Carregado!")
+    else:
+        print("Usando Grade Linear (Padrao)")
+
     calibrator = DetectorCalibrator()
     
     # Criar janela com trackbars
@@ -145,9 +199,17 @@ def main():
         vis = warped.copy()
         
         # Grid
-        for i in range(9):
-            cv2.line(vis, (i * sq_size, 0), (i * sq_size, board_size), (50, 50, 50), 1)
-            cv2.line(vis, (0, i * sq_size), (board_size, i * sq_size), (50, 50, 50), 1)
+        if grid.grid_lines_x and grid.grid_lines_y:
+             # Draw Smart Grid (Greenish)
+             for x in grid.grid_lines_x:
+                 cv2.line(vis, (int(x), 0), (int(x), board_size), (0, 200, 100), 1)
+             for y in grid.grid_lines_y:
+                 cv2.line(vis, (0, int(y)), (board_size, int(y)), (0, 200, 100), 1)
+        else:
+             # Draw Linear Grid (Gray)
+             for i in range(9):
+                 cv2.line(vis, (i * sq_size, 0), (i * sq_size, board_size), (50, 50, 50), 1)
+                 cv2.line(vis, (0, i * sq_size), (board_size, i * sq_size), (50, 50, 50), 1)
         
         # Contadores por método
         method_counts = {}
@@ -178,7 +240,22 @@ def main():
                 }
                 color = colors.get(method, (255, 255, 255))
                 
+                # Calculate Area %
+                area_piece = np.pi * (radius ** 2)
+                area_square = sq_size ** 2
+                pct_area = (area_piece / area_square) * 100
+                pct_bg = 100 - pct_area
+                
                 cv2.circle(vis, (center_x, center_y), radius, color, 2)
+                
+                # Show percentages
+                # Piece %
+                cv2.putText(vis, f"Area:{pct_area:.0f}%", (center_x - 20, center_y - radius - 5),
+                           cv2.FONT_HERSHEY_SIMPLEX, 0.3, color, 1)
+                # Bg % (inverso)
+                cv2.putText(vis, f"Bg:{pct_bg:.0f}%", (center_x - 20, center_y + radius + 10),
+                           cv2.FONT_HERSHEY_SIMPLEX, 0.3, (200, 200, 200), 1)
+                           
                 cv2.putText(vis, f"{conf:.0%}", (center_x - 12, center_y + 5),
                            cv2.FONT_HERSHEY_SIMPLEX, 0.3, color, 1)
             else:
@@ -238,7 +315,7 @@ def main():
             use_smoothing = not use_smoothing
             print(f"[Toggle] Smoothing: {use_smoothing}")
         elif key == ord('s'):
-            calibrator.save_settings()
+            calibrator.save_settings(results, sq_size)
         elif key == ord('r'):
             calibrator.params = {
                 'min_radius': 20,

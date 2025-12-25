@@ -11,7 +11,12 @@ Técnicas:
 """
 
 import cv2
+import json
+import os
+import cv2
 import numpy as np
+
+SETTINGS_FILE = "piece_detector_settings.json"
 
 
 class PieceDetector:
@@ -36,10 +41,31 @@ class PieceDetector:
         self.min_presence = 0.6       # 60% presença para confirmar peça
         self.detection_history = {}   # {(file, rank): [bool, bool, ...]}
         
+        # Load custom settings if available
+        self.load_settings()
+        
         # DELTA DETECTION - referência para detectar mudanças
         self.reference_squares = {}   # {(file, rank): grayscale_img}
         self.cached_results = {}      # {(file, rank): detection_result}
         self.change_threshold = 25    # Diferença média de pixels para considerar mudança
+    
+    def load_settings(self):
+        """Carrega parâmetros salvos."""
+        if os.path.exists(SETTINGS_FILE):
+            try:
+                with open(SETTINGS_FILE, 'r') as f:
+                    params = json.load(f)
+                    # Convert percentages back to ratios
+                    if 'min_radius' in params:
+                        self.min_radius_ratio = params['min_radius'] / 100.0
+                    if 'max_radius' in params:
+                        self.max_radius_ratio = params['max_radius'] / 100.0
+                    if 'hough_param1' in params:
+                        # Might store other params here too
+                        pass
+                print(f"[PieceDetector] Settings loaded from {SETTINGS_FILE}")
+            except Exception as e:
+                print(f"[PieceDetector] Error loading settings: {e}")
     
     def calibrate_reference(self, squares_dict):
         """Salva referência das imagens para detecção delta."""
@@ -195,18 +221,21 @@ class PieceDetector:
         h, w = gray.shape
         min_dim = min(h, w)
         
-        # Range unificado: 12% (tower top) a 55% (peça cheia)
-        min_radius = int(min_dim * 0.12)
-        max_radius = int(min_dim * 0.55)
+        # Range unificado: Usa parametros da classe (carregados do JSON)
+        min_radius = int(min_dim * self.min_radius_ratio)
+        max_radius = int(min_dim * self.max_radius_ratio)
         
-        # Param2=25 (mais sensível para pegar ambos)
+        # Param2 carregado ou padrao
+        param2 = getattr(self, 'hough_param2', 25)
+        param1 = getattr(self, 'hough_param1', 100)
+        
         circles = cv2.HoughCircles(
             gray,
             cv2.HOUGH_GRADIENT,
             dp=1.2,
             minDist=min_dim // 3,
-            param1=100,
-            param2=25,
+            param1=param1,
+            param2=param2,
             minRadius=min_radius,
             maxRadius=max_radius
         )

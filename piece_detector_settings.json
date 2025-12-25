@@ -1,0 +1,10 @@
+{
+  "min_radius": 25,
+  "max_radius": 55,
+  "hough_param1": 100,
+  "hough_param2": 30,
+  "small_min": 12,
+  "small_max": 25,
+  "knight_aspect_max": 250,
+  "center_diff_thresh": 40
+}

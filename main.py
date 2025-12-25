@@ -11,8 +11,9 @@ import chess
 import time
 
 import board_detection
-from grid_extractor import GridExtractor
+from grid_extractor import SmartGridExtractor
 from calibration_module import CalibrationModule
+from frame_enhancer import ImageEnhancer
 from change_detector import ChangeDetector
 from game_state import GameState
 from noise_handler import NoiseHandler, NoiseState
@@ -48,10 +49,18 @@ def main():
     points_ordered = board_detection.reorder(board_corners)
     
     # Phase 2: Initialize
-    grid = GridExtractor()
+    grid = SmartGridExtractor()
+    if "grid_lines_x" in config and config["grid_lines_x"]:
+        grid.grid_lines_x = config["grid_lines_x"]
+        grid.grid_lines_y = config["grid_lines_y"]
+        print("Smart Grid Carregado!")
+    else:
+        print("Usando Grade Linear (Padrao)")
+        
     game = GameState()
     detector = ChangeDetector()  # Loads sensitivity from file
     noise = NoiseHandler()  # State machine for noise handling
+    enhancer = ImageEnhancer() # Color calibration and enhancement
     
     print(f"\n=== JOGO INICIADO ===")
     print(f"Jogador: {player_color}")
@@ -63,7 +72,9 @@ def main():
     
     success, img = cap.read()
     if success:
-        warped, _, _ = board_detection.warp_image(img, points_ordered)
+        # Dual stream: Display(img) vs Processing(img_proc)
+        img_proc = enhancer.process_pipeline(img)
+        warped, _, _ = board_detection.warp_image(img_proc, points_ordered)
         if orientation_flipped:
             warped = cv2.rotate(warped, cv2.ROTATE_180)
         squares = grid.split_board(warped)
@@ -83,6 +94,10 @@ def main():
             break
         
         # FPS counter
+        
+        # Apply Enhancement Pipeline
+        img_display = img.copy()
+        img_proc = enhancer.process_pipeline(img)
         frame_count += 1
         elapsed = time.time() - fps_start
         if elapsed >= 1.0:
@@ -92,17 +107,23 @@ def main():
         
         # Skip frames for performance (still capture for camera buffer)
         if SKIP_FRAMES > 1 and frame_count % SKIP_FRAMES != 0:
-            cv2.imshow("Camera", img)  # Keep showing camera
+            cv2.imshow("Camera", img_display)  # Keep showing camera
             if cv2.waitKey(1) & 0xFF == ord('q'):
                 break
             continue
         
         # Warp board
-        warped, _, board_size = board_detection.warp_image(img, points_ordered)
+        # Warp board - Processing Stream
+        warped_proc, _, board_size = board_detection.warp_image(img_proc, points_ordered)
         if orientation_flipped:
-            warped = cv2.rotate(warped, cv2.ROTATE_180)
+            warped_proc = cv2.rotate(warped_proc, cv2.ROTATE_180)
         
-        squares = grid.split_board(warped)
+        # Warp board - Display Stream
+        warped_display, _, _ = board_detection.warp_image(img_display, points_ordered)
+        if orientation_flipped:
+            warped_display = cv2.rotate(warped_display, cv2.ROTATE_180)
+        
+        squares = grid.split_board(warped_proc)
         sq_size = board_size // 8
         
         # Detect changes
@@ -140,7 +161,7 @@ def main():
             detector.clear_focus()
         
         # Draw visualization
-        vis = warped.copy()
+        vis = warped_display.copy()
         
         # Draw grid lines
         for i in range(9):
@@ -311,7 +332,7 @@ def main():
         
         # Show
         cv2.imshow("Tabuleiro", vis)
-        cv2.imshow("Camera", img)
+        cv2.imshow("Camera", img_display)
         
         key = cv2.waitKey(1) & 0xFF
         if key == ord('q'):
