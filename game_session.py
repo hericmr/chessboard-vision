@@ -314,6 +314,28 @@ class GameSession:
             cv2.putText(vis, "jogada em andamento", (board_size//2 - 120, board_size//2),
                        cv2.FONT_HERSHEY_SIMPLEX, 1.0, (0, 0, 255), 3)
 
+        # Highlight Last Move (Blue - Both Players)
+        with self.board_lock:
+            if self.game.board and len(self.game.board.move_stack) > 0:
+                last_move = self.game.board.peek()
+                overlay = vis.copy()
+                
+                # Origin square
+                f_src = chess.square_file(last_move.from_square)
+                r_src = chess.square_rank(last_move.from_square)
+                col_src, row_src = f_src, 7 - r_src
+                x1, y1 = col_src * sq_size, row_src * sq_size
+                cv2.rectangle(overlay, (x1, y1), (x1+sq_size, y1+sq_size), (100, 50, 0), -1)  # Azul escuro
+                
+                # Destination square
+                f_dst = chess.square_file(last_move.to_square)
+                r_dst = chess.square_rank(last_move.to_square)
+                col_dst, row_dst = f_dst, 7 - r_dst
+                x1, y1 = col_dst * sq_size, row_dst * sq_size
+                cv2.rectangle(overlay, (x1, y1), (x1+sq_size, y1+sq_size), (100, 50, 0), -1)  # Azul escuro
+                
+                cv2.addWeighted(overlay, 0.5, vis, 0.5, 0, vis)
+
         # Lifted Piece & Radar
         if self.lifted_piece_square:
             lf, lr = self.lifted_piece_square
@@ -327,9 +349,11 @@ class GameSession:
             df, dr = dest
             col, row = df, 7 - dr
             x1, y1 = col * sq_size, row * sq_size
+            cx, cy = x1 + sq_size//2, y1 + sq_size//2
+            radius = int(sq_size * 0.4 / 2)  # 40% da casa
             overlay = vis.copy()
-            cv2.rectangle(overlay, (x1, y1), (x1+sq_size, y1+sq_size), (180, 100, 150), -1)
-            cv2.addWeighted(overlay, 0.4, vis, 0.6, 0, vis)
+            cv2.circle(overlay, (cx, cy), radius, (0, 100, 0), -1)  # Verde escuro preenchido
+            cv2.addWeighted(overlay, 0.6, vis, 0.4, 0, vis)  # 60% verde, 40% original
 
         # Draw Pieces - Needs Lock because accessing board state which might change by stream thread
         with self.board_lock:
